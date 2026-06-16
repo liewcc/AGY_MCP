@@ -112,48 +112,63 @@ def _strings(b, depth=0, out=None):
     return out
 
 
-def _answer_from_db(path: str) -> str:
-    """Extract the assistant reply from a conversation DB.
-
-    The reply lives in rows where step_type=15, protobuf field 1. A single run can
-    write several step_type=15 rows, some carrying stray tokens — so we take the
-    SINGLE LONGEST field-1 string rather than joining them all (joining used to
-    prepend junk like a stray `omd3nkj5` token). Falls back to the longest printable
-    field of any number if field 1 is absent.
-    """
+def _rows(path):
+    """Return (idx, step_type, step_payload) rows ordered by idx, or [] if unreadable."""
     import sqlite3
 
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    field1, anyfield = [], []
     try:
-        for (payload,) in con.execute(
-            "SELECT step_payload FROM steps WHERE step_type=15 ORDER BY idx"
-        ):
-            if not payload:
-                continue
-            for f, s in _strings(payload):
-                anyfield.append(s)
-                if f == 1:
-                    field1.append(s)
+        return con.execute(
+            "SELECT idx, step_type, step_payload FROM steps ORDER BY idx"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
     finally:
         con.close()
-    pool = field1 or anyfield
-    return max(pool, key=len).strip() if pool else ""
 
 
-def ask_agy(prompt: str, model: str | None = None, add_dirs=None, timeout: int | None = None):
-    """Run one headless prompt through the Antigravity CLI and return (answer, db_name).
+def _answer_from_db(path: str) -> str:
+    """Extract the assistant reply to the LATEST turn from a conversation DB.
+
+    Turn layout (verified): user prompt = step_type 14; the assistant's final text =
+    a step_type 15 row, protobuf field 1. Within one turn there can be several
+    step_type 15 rows, the early ones carrying stray tool-call ids (e.g. `omd3nkj5`),
+    the real answer being the longest. So we look only at step_type 15 rows that come
+    AFTER the last step_type 14 (the latest user turn) and take the longest field 1.
+    Taking the latest turn — not the global longest — is what makes multi-turn resume
+    return the right answer when an earlier turn's reply happens to be longer.
+    """
+    rows = _rows(path)
+    last_user = max((idx for idx, st, _ in rows if st == 14), default=-1)
+    texts = []
+    for idx, st, payload in rows:
+        if st == 15 and idx > last_user and payload:
+            texts.extend(s for f, s in _strings(payload) if f == 1)
+    return max(texts, key=len).strip() if texts else ""
+
+
+def ask_agy(
+    prompt: str,
+    model: str | None = None,
+    add_dirs=None,
+    timeout: int | None = None,
+    conversation: str | None = None,
+):
+    """Run one headless prompt through the Antigravity CLI and return (answer, conv_id).
 
     Args:
-        prompt:   The prompt text.
-        model:    Model display name (default AGY_DEFAULT_MODEL). "Gemini 3 Pro"
-                  resolves to "Gemini 3.5 Flash (Medium)".
-        add_dirs: Folders to expose to the agent for file/image analysis; reference
-                  the file path inside the prompt — there is no upload flag.
-        timeout:  Hard cap in seconds (default AGY_TIMEOUT).
+        prompt:       The prompt text.
+        model:        Model display name (default AGY_DEFAULT_MODEL). "Gemini 3 Pro"
+                      resolves to "Gemini 3.5 Flash (Medium)".
+        add_dirs:     Folders to expose to the agent for file/image analysis; reference
+                      the file path inside the prompt — there is no upload flag.
+        timeout:      Hard cap in seconds (default AGY_TIMEOUT).
+        conversation: Conversation id to resume (`--conversation <id>`); the reply is
+                      appended to the same conversation so context carries over. If
+                      None, a fresh conversation is started.
 
     Returns:
-        (answer_text, conversation_db_filename)
+        (answer_text, conversation_id) — pass conversation_id back in to continue.
     """
     model = model or DEFAULT_MODEL
     timeout = timeout or DEFAULT_TIMEOUT
@@ -162,6 +177,8 @@ def ask_agy(prompt: str, model: str | None = None, add_dirs=None, timeout: int |
     cwd = _resolve_trusted_cwd()
 
     args = [AGY_BIN, "--model", model, "--dangerously-skip-permissions"]
+    if conversation:
+        args += ["--conversation", conversation]
     for d in (add_dirs or []):
         args += ["--add-dir", d]
     args += ["--print", prompt]
@@ -178,22 +195,30 @@ def ask_agy(prompt: str, model: str | None = None, add_dirs=None, timeout: int |
         timeout=timeout,
     )
 
-    dbs = [p for p in glob.glob(os.path.join(CONV_DIR, "*.db")) if os.path.getmtime(p) >= start - 1]
-    if not dbs:
+    # Each run also creates an empty companion DB (~48 KB, no steps). Pick the one
+    # that actually holds an answer — newest-first, skipping the empty shells.
+    touched = sorted(
+        (p for p in glob.glob(os.path.join(CONV_DIR, "*.db")) if os.path.getmtime(p) >= start - 1),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if not touched:
         raise RuntimeError("agy wrote no conversation DB for this run (auth/quota issue?).")
-    newest = max(dbs, key=os.path.getmtime)
-    answer = _answer_from_db(newest)
-    if not answer:
-        raise RuntimeError(f"agy produced an empty answer (db={os.path.basename(newest)}).")
-    return answer, os.path.basename(newest)
+    for path in touched:
+        answer = _answer_from_db(path)
+        if answer:
+            return answer, os.path.splitext(os.path.basename(path))[0]
+    raise RuntimeError(
+        f"agy produced an empty answer (dbs touched: {[os.path.basename(p) for p in touched]})."
+    )
 
 
 if __name__ == "__main__":
     p = sys.argv[1] if len(sys.argv) > 1 else "What is 17 * 23? Reply with only the number."
     m = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODEL
     t0 = time.time()
-    ans, db = ask_agy(p, m)
+    ans, conv = ask_agy(p, m)
     print(f"PROMPT : {p}")
     print(f"MODEL  : {m}")
-    print(f"DB     : {db}   ({time.time() - t0:.1f}s)")
+    print(f"CONV   : {conv}   ({time.time() - t0:.1f}s)")
     print(f"ANSWER : {ans!r}")
