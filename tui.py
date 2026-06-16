@@ -27,7 +27,7 @@ import urllib.request
 import pytermgui as ptg
 import win32cred
 
-from agy_models import list_models
+from agy_models import list_models, get_quota_summary
 
 # Where the Antigravity CLI lives. Mirrors AGY_BIN in agy_client.py so the
 # panel reports the same path the server actually uses.
@@ -64,6 +64,13 @@ MODELS_LOADING: bool = False
 # Never persisted — refreshed from agy each session.
 QUOTA_CACHE: list[dict] = []
 QUOTA_LOADING: bool = False
+
+# gRPC-based group quota summary (Weekly / Five-Hour limits for Gemini and Claude/GPT).
+QUOTA_SUMMARY_CACHE: dict | None = None
+QUOTA_SUMMARY_LOADING: bool = False
+
+# Current scroll offset (in rows) for the content panel.  Reset to 0 on view change.
+CONTENT_SCROLL: int = 0
 
 # Rendered height (rows) of the status panel C — measured at build time so the
 # left rail B and the main panel D can be padded to the same total height.
@@ -224,10 +231,11 @@ def on_logout_click(button: ptg.Widget) -> None:
     except Exception:
         pass
         
-    global MODELS_CACHE, QUOTA_CACHE
+    global MODELS_CACHE, QUOTA_CACHE, QUOTA_SUMMARY_CACHE
     MODELS_CACHE = []
     QUOTA_CACHE = []
-    
+    QUOTA_SUMMARY_CACHE = None
+
     global PROFILE_LABEL
     if PROFILE_LABEL:
         PROFILE_LABEL.value = "[dim]current log in profile:  [247](not signed in)"
@@ -260,15 +268,17 @@ def _update_profile_loop(manager: ptg.WindowManager) -> None:
 
         if display_email != last_email:
             last_email = display_email
-            global PROFILE_LABEL, MODELS_CACHE, QUOTA_CACHE
+            global PROFILE_LABEL, MODELS_CACHE, QUOTA_CACHE, QUOTA_SUMMARY_CACHE
             if PROFILE_LABEL:
                 PROFILE_LABEL.value = f"[dim]current log in profile:  [247]{display_email}"
             MODELS_CACHE = []
             QUOTA_CACHE = []
+            QUOTA_SUMMARY_CACHE = None
             if ACTIVE_VIEW == "Models":
                 _fetch_models_async()
             elif ACTIVE_VIEW == "Quota":
                 _fetch_quota_async()
+                _fetch_quota_summary_async()
             dirty = True
 
         # External model switch → move the selection dot in the Models view.
@@ -628,14 +638,25 @@ def _format_quota_row(bucket: dict) -> str:
     return f"  {model_padded} {pct_styled} {reset_display}"
 
 
+def _redraw_quota() -> None:
+    """Re-render the Quota view and flush the compositor."""
+    if ACTIVE_VIEW == "Quota":
+        update_content_ui("Quota")
+        if ACTIVE_MANAGER:
+            try:
+                ACTIVE_MANAGER.compositor.redraw()
+            except Exception:
+                pass
+
+
 def _fetch_quota_async() -> None:
-    """Fetch the live quota list off the UI thread, then re-render Quota."""
+    """Fetch individual model daily-request quotas from cloudcode-pa REST API off the UI thread."""
     global QUOTA_LOADING
     if QUOTA_LOADING:
         return
     QUOTA_LOADING = True
 
-    def work() -> None:
+    def _work() -> None:
         global QUOTA_CACHE, QUOTA_LOADING
         try:
             buckets = _get_quota_data()
@@ -644,16 +665,31 @@ def _fetch_quota_async() -> None:
         if buckets is not None:
             QUOTA_CACHE = buckets
         QUOTA_LOADING = False
-        if ACTIVE_VIEW == "Quota":
-            update_content_ui("Quota")
-            if ACTIVE_MANAGER:
-                try:
-                    ACTIVE_MANAGER.compositor.redraw()
-                except Exception:
-                    pass
+        _redraw_quota()
 
-    threading.Thread(target=work, daemon=True).start()
+    threading.Thread(target=_work, daemon=True).start()
 
+
+def _fetch_quota_summary_async() -> None:
+    """Fetch group quota from agy's gRPC language server off the UI thread (~15 s)."""
+    global QUOTA_SUMMARY_LOADING
+    if QUOTA_SUMMARY_LOADING:
+        return
+    QUOTA_SUMMARY_LOADING = True
+
+    def _work() -> None:
+        global QUOTA_SUMMARY_CACHE, QUOTA_SUMMARY_LOADING
+        try:
+            result = get_quota_summary()
+        except Exception as exc:
+            _log_exc("_fetch_quota_summary_async", exc)
+            result = None
+        if result is not None:
+            QUOTA_SUMMARY_CACHE = result
+        QUOTA_SUMMARY_LOADING = False
+        _redraw_quota()
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 TUI_START_TIME = time.time()
@@ -697,43 +733,57 @@ def _get_session_usage() -> dict:
     }
 
 
-def _format_group_limit(name: str, pct_5h: float, pct_weekly: float) -> list[str]:
-    """Format group limits with text progress bars."""
-    def make_bar(pct: float) -> str:
-        width = 15
-        filled = int(round(pct * width / 100))
-        bar = "█" * filled + "░" * (width - filled)
-        return f"{bar} {pct:>6.2f}%"
-
-    return [
-        f"  [bold]{name}[/]",
-        f"    5-Hour Limit:  {make_bar(pct_5h)}",
-        f"    Weekly Limit:  {make_bar(pct_weekly)}"
-    ]
-
-
 def _content_widgets(view: str) -> list[ptg.Widget]:
     """Widgets shown in the content panel for a given view."""
     if view == "Quota":
-        if not QUOTA_CACHE:
-            msg = "Loading quota…" if QUOTA_LOADING else "(no quota info — signed in?)"
-            return [ptg.Label("[72 bold]Quota"), ptg.Label(""), ptg.Label(f"[dim]{msg}")]
-        
+        def _bar(pct: float) -> str:
+            filled = int(round(pct * 15 / 100))
+            return "█" * filled + "░" * (15 - filled)
+
+        def _countdown(ts: int | None) -> str:
+            if ts is None:
+                return ""
+            secs = max(0, ts - int(time.time()))
+            d, rem = divmod(secs, 86400)
+            h, rem2 = divmod(rem, 3600)
+            m = rem2 // 60
+            if d > 0: return f"{d}d {h}h"
+            if h > 0: return f"{h}h {m}m"
+            return f"{m}m"
+
+        def _color(pct: float) -> str:
+            return "210" if pct < 10 else ("220" if pct < 40 else "120")
+
         rows: list[ptg.Widget] = [
             ptg.Label("[72 bold]Account Group Limits"),
-            ptg.Label("")
+            ptg.Label(""),
         ]
-        # Format Gemini Group Limits (simulated values based on proxy server constraints)
-        for line in _format_group_limit("Gemini Group Limits", 52.65, 88.31):
-            rows.append(ptg.Label(line))
-        rows.append(ptg.Label(""))
-        
-        # Format Claude & GPT Group Limits (simulated values based on proxy server constraints)
-        for line in _format_group_limit("Claude & GPT Group Limits", 0.00, 0.00):
-            rows.append(ptg.Label(line))
-        rows.append(ptg.Label(""))
-        
-        # Session Usage Summary (equivalent to /usage command output)
+
+        if QUOTA_SUMMARY_CACHE:
+            for key, header in (
+                ("gemini",    "Gemini Group Limits"),
+                ("claude_gpt", "Claude & GPT Group Limits"),
+            ):
+                g = QUOTA_SUMMARY_CACHE.get(key)
+                rows.append(ptg.Label(f"  [bold]{header}[/]"))
+                if g:
+                    for lk, label in (("weekly", "Weekly Limit"), ("fiveh", "Five-Hour Limit")):
+                        pct = g.get(f"{lk}_pct")
+                        if pct is not None:
+                            c = _color(pct)
+                            rows.append(ptg.Label(
+                                f"    {label:<17}  {_bar(pct)} [{c}]{pct:>6.2f}%[/]"
+                            ))
+                            cd = _countdown(g.get(f"{lk}_reset_ts"))
+                            if cd:
+                                rows.append(ptg.Label(f"      [dim]Refreshes in {cd}[/]"))
+                rows.append(ptg.Label(""))
+        elif QUOTA_SUMMARY_LOADING:
+            rows += [ptg.Label("    [dim]Loading… (~15 s)[/]"), ptg.Label("")]
+        else:
+            rows += [ptg.Label("    [dim](sign in to view limits)[/]"), ptg.Label("")]
+
+        # Session Usage Summary
         usage = _get_session_usage()
         rows.extend([
             ptg.Label("[72 bold]Session Usage Summary"),
@@ -742,16 +792,18 @@ def _content_widgets(view: str) -> list[ptg.Widget]:
             ptg.Label(f"  Session Elapsed:   [247]{usage['elapsed']}[/]"),
             ptg.Label(f"  Est. Tokens Used:  [247]{usage['tokens']}[/]"),
             ptg.Label(f"  Workspace:         [247]{usage['workspace']}[/]"),
-            ptg.Label("")
+            ptg.Label(""),
         ])
-        
-        # Individual Model Quotas (retrieved dynamically from cloudcode API)
-        rows.extend([
-            ptg.Label("[72 bold]Individual Model Quotas"),
-            ptg.Label("")
-        ])
-        for bucket in QUOTA_CACHE:
-            rows.append(ptg.Label(_format_quota_row(bucket)))
+
+        # Individual Model Quotas (daily request limits from REST API)
+        rows += [ptg.Label("[72 bold]Individual Model Quotas"), ptg.Label("")]
+        if QUOTA_CACHE:
+            for bucket in QUOTA_CACHE:
+                rows.append(ptg.Label(_format_quota_row(bucket)))
+        elif QUOTA_LOADING:
+            rows.append(ptg.Label("    [dim]Loading…[/]"))
+        else:
+            rows.append(ptg.Label("    [dim](sign in to view quotas)[/]"))
         return rows
 
 
@@ -779,32 +831,65 @@ def update_content_ui(view: str) -> None:
     """
     if not (CONTENT_PANEL and SIDEBAR_BOX):
         return
-    content = _content_widgets(view)
-    content_rows = len(content)
-    # right column height = STATUS_H + 1 (gap) + 2 (frame) + content_rows
-    body_h = max(content_rows + STATUS_H + 3, ptg.terminal.height - 6)
-    content_h = body_h - STATUS_H - 3   # rows inside D's frame
-    sidebar_h = body_h - 2              # rows inside B's frame
+    content_all = _content_widgets(view)
+    total_rows = len(content_all)
+    # Visible terminal height available for content panel body.
+    vis_h = max(ptg.terminal.height - 6 - STATUS_H - 3, 5)
 
-    content += [ptg.Label("") for _ in range(content_h - content_rows)]
+    # Clamp scroll offset so the last page always fills the viewport.
+    global CONTENT_SCROLL
+    CONTENT_SCROLL = max(0, min(CONTENT_SCROLL, total_rows - vis_h))
+
+    # Slice the visible window.
+    visible = content_all[CONTENT_SCROLL: CONTENT_SCROLL + vis_h]
+
+    # Scroll indicator on the last visible row when content overflows.
+    if total_rows > vis_h:
+        end = CONTENT_SCROLL + len(visible)
+        indicator = ptg.Label(
+            f"[dim]  ↑/↓  pgup/pgdn  ·  {CONTENT_SCROLL + 1}-{end} of {total_rows}[/]"
+        )
+        visible[-1] = indicator
+
+    visible += [ptg.Label("") for _ in range(vis_h - len(visible))]
+
+    # Both Splitter columns must be the same height.
+    body_h = vis_h + STATUS_H + 3
+    sidebar_h = body_h - 2
     sidebar: list[ptg.Widget] = list(SIDEBAR_ITEMS.values())
     sidebar += [ptg.Label("") for _ in range(sidebar_h - len(sidebar))]
-    CONTENT_PANEL.set_widgets(content)
+    CONTENT_PANEL.set_widgets(visible)
     SIDEBAR_BOX.set_widgets(sidebar)
+
+
+def _scroll(delta: int) -> None:
+    """Shift the content panel scroll offset by delta rows and redraw."""
+    global CONTENT_SCROLL
+    CONTENT_SCROLL += delta
+    update_content_ui(ACTIVE_VIEW)
+    if ACTIVE_MANAGER:
+        try:
+            ACTIVE_MANAGER.compositor.redraw()
+        except Exception:
+            pass
 
 
 def select_view(view: str) -> None:
     """Activate a sidebar view and refresh the content panel."""
-    global ACTIVE_VIEW
+    global ACTIVE_VIEW, CONTENT_SCROLL
     ACTIVE_VIEW = view
+    CONTENT_SCROLL = 0
     for name, btn in SIDEBAR_ITEMS.items():
         btn.active = (name == view)
     # Fetch the model list on demand (off the UI thread). Gated on a running
     # manager so build_window() stays pure / TTY-free for smoke tests.
     if view == "Models" and not MODELS_CACHE and ACTIVE_MANAGER:
         _fetch_models_async()
-    elif view == "Quota" and not QUOTA_CACHE and ACTIVE_MANAGER:
-        _fetch_quota_async()
+    elif view == "Quota" and ACTIVE_MANAGER:
+        if not QUOTA_CACHE:
+            _fetch_quota_async()
+        if QUOTA_SUMMARY_CACHE is None and not QUOTA_SUMMARY_LOADING:
+            _fetch_quota_summary_async()
     update_content_ui(view)
     if ACTIVE_MANAGER:
         try:
@@ -867,6 +952,12 @@ def main() -> None:
     with ptg.WindowManager() as manager:
         ACTIVE_MANAGER = manager
         manager.add(build_window())
+
+        # Arrow keys / page keys scroll the content panel.
+        manager.bind("\x1b[A", lambda *_: _scroll(-1))   # ↑
+        manager.bind("\x1b[B", lambda *_: _scroll(1))    # ↓
+        manager.bind("\x1b[5~", lambda *_: _scroll(-10)) # Page Up
+        manager.bind("\x1b[6~", lambda *_: _scroll(10))  # Page Down
 
         # Preload the live model list (default view is Models).
         _fetch_models_async()

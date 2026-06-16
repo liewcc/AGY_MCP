@@ -19,7 +19,7 @@ rides the CLI's local OAuth login. Full details in [README.md](README.md).
 | `agy_models.py` | Live model list — runs `agy models` under a Windows ConPTY. |
 | `conversations.py` | List / read past conversations. |
 | `tui.py` | **Terminal control panel** (pytermgui). Launched by `run.bat`. |
-| `requirements.txt` | `mcp[cli]`, `pytermgui`, `pywin32`. |
+| `requirements.txt` | `mcp[cli]`, `pytermgui`, `grpcio`. |
 | `setup.bat` / `run.bat` | Install deps / launch the TUI. |
 
 ## Active work
@@ -27,9 +27,14 @@ rides the CLI's local OAuth login. Full details in [README.md](README.md).
 The pytermgui TUI control panel is **functional**:
 - Left rail: `Models` / `Quota` navigation.
 - Models view: lists live models and allows selection.
-- Quota view: **Completed**. Displays both `/quota` and `/usage` details.
-  - *How it was done*: Queries individual model quotas dynamically via the Google Cloud Code API, simulates account-level/group-level limits (Gemini and Claude groups) with text progress bars, and dynamically computes session usage metrics (active model, elapsed time, current workspace, and estimated tokens parsed from the latest conversation trajectory SQLite database).
-- **Next steps**: Incrementally add chat session capabilities, hook up real OAuth login triggers, or refine the layout based on owner visual feedback.
+- Quota view: **Completed with real gRPC data**.
+  - *Group Limits*: real Weekly / Five-Hour progress bars for Gemini and Claude & GPT
+    groups, sourced from `agy`'s local gRPC language server
+    (`RetrieveUserQuotaSummary`). See AGENTS.md for the full technique and code.
+  - *Session Usage*: active model, elapsed time, workspace, estimated tokens from SQLite.
+  - *Individual Model Quotas*: daily request counts from REST `retrieveUserQuota`.
+- **Next steps**: Incrementally add chat session capabilities, hook up real OAuth
+  login triggers, or refine the layout based on owner visual feedback.
 
 
 ## Conventions
@@ -38,7 +43,7 @@ The pytermgui TUI control panel is **functional**:
   backslashes; the dev shell is PowerShell.
 - **TUI = pytermgui**, chosen for minimal disk footprint (only `wcwidth`). Do not
   swap to Textual/Rich without asking the owner.
-- **Frame colour is uniform grey `240`.** Palette is in HANDOFF.md §7.
+- **Frame colour is uniform grey `240`.** Palette is in HANDOFF.md §8.
 - **Smoke-test the TUI without a TTY:**
   `PYTHONIOENCODING=utf-8 python -c "import tui; tui.build_window()"`.
   Set `PYTHONIOENCODING=utf-8` for anything that prints box-drawing characters

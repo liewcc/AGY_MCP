@@ -3,3 +3,6 @@ mcp[cli]
 
 # Terminal UI control panel (only dep is wcwidth — tiny footprint)
 pytermgui
+
+# gRPC client for RetrieveUserQuotaSummary via agy's local language server
+grpcio

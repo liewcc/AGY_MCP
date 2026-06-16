@@ -7,3 +7,7 @@ venv/
 # TUI crash log + obsolete intermediate layout backup
 tui_crash.log
 tui.sidebar-layout.bak.py
+
+# Debug / scratch logs written during development
+*.log
+*_debug.json

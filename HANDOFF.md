@@ -15,11 +15,16 @@ The TUI (`tui.py`, launched by `run.bat`) is **functional**:
   (`log in` / `log out` + profile) over the main panel **D** (content).
 - **Models view**: lists the **live** model labels from `agy models`, with a green `●`
   on the currently-selected one; click a row to switch (writes `settings.json`).
-- **Quota & Usage view**: **Fully completed** rendering in panel **D**.
-  - Displays simulated account-wide group limits (Gemini/Claude weekly & 5-hour progress bars).
-  - Displays session usage stats (active model, elapsed session time, workspace directory, and estimated token counts parsed from the newest conversation DB).
-  - Displays live individual Gemini model quotas queried from GCP CloudCode REST APIs.
-- Login/logout + profile email work; a 3s background poll keeps the profile line
+- **Quota & Usage view**: **Fully completed** with **real gRPC data** (Method E below).
+  - **Account Group Limits**: real Weekly / Five-Hour progress bars for Gemini group AND
+    Claude & GPT group, fetched live from `agy`'s local language-server gRPC endpoint
+    `RetrieveUserQuotaSummary`. Color-coded: green ≥ 40%, yellow 10–40%, red < 10%.
+    Countdown timers compute seconds-until-reset from the Unix timestamps in the response.
+  - **Session Usage**: active model, elapsed time, workspace dir, estimated tokens from
+    the newest conversation SQLite DB.
+  - **Individual Model Quotas**: daily request counts from the REST `retrieveUserQuota`
+    endpoint (Gemini model IDs only, all separate from the group token limits above).
+- Login/logout + profile email work; a 3 s background poll keeps the profile line
   and the selection `●` in sync with external `/model` changes.
 
 Backups/scratch: `tui.sidebar-layout.bak.py` is an obsolete intermediate layout
@@ -39,7 +44,7 @@ Useful flags: `--print/-p <prompt>`, `--model <label>`, `--conversation <id>`,
 `--continue/-c`, `--dangerously-skip-permissions`, `--add-dir <dir>`,
 `--log-file <path>`.
 
-There are **three** ways to get data out of `agy` (plus a prompt round-trip).
+There are **four** ways to get data out of `agy` (plus a prompt round-trip).
 Pick per need.
 
 ---
@@ -119,12 +124,145 @@ All are `POST`.
 Notes:
 - This build uses the `daily-cloudcode-pa` host for its own calls; quota works on
   the prod `cloudcode-pa` host.
-- The Quota view (next task) should call `:retrieveUserQuota` and format the
-  buckets (model id, `remainingFraction` as %, `resetTime`).
+- `:retrieveUserQuota` returns **daily request counts** for Gemini model IDs only.
+  It does **not** return the Weekly/Five-Hour token-capacity group limits shown by
+  `agy /usage`. Those come from Method E below.
 
 ---
 
-## 5. Method D — headless prompt round-trip (`agy --print`)
+## 5. Method E — local gRPC language server (`RetrieveUserQuotaSummary`)
+
+This is the method used by `agy` itself for `/usage`. It is the **only** source for
+the real Weekly / Five-Hour group quota limits (Gemini group and Claude/GPT group).
+
+### How agy exposes this
+
+When `agy` starts (any mode — interactive, `--print`, or headless), it spawns an
+in-process language server that opens **two** random TCP ports on `127.0.0.1`:
+
+| Port | Protocol |
+|---|---|
+| Lower number | gRPC over **self-signed TLS** |
+| Higher number | HTTP (`/healthz` only) |
+
+The ports are logged at startup:
+```
+Language server listening on random port at 52309 for HTTPS (gRPC)
+Language server listening on random port at 52310 for HTTP
+```
+(See `~/.gemini/antigravity-cli/log/cli-YYYYMMDD_HHMMSS.log`)
+
+### Port discovery
+
+Snapshot `Get-NetTCPConnection` **before** and **after** starting agy, take the diff:
+
+```python
+import subprocess, re
+_C = 0x08000000  # CREATE_NO_WINDOW
+
+def _local_ports() -> set[int]:
+    r = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command",
+         "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 "
+         "-ErrorAction SilentlyContinue | Select-Object LocalPort | ConvertTo-Json"],
+        capture_output=True, text=True, creationflags=_C)
+    return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
+
+ports_before = _local_ports()
+proc = subprocess.Popen([AGY_BIN], stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, creationflags=_C)
+# poll until len(new) >= 2, sleep 0.5 s between polls
+grpc_port = min(_local_ports() - ports_before)   # lower = gRPC/TLS
+```
+
+### TLS certificate
+
+The language server uses a per-session **self-signed cert**. Python's `grpcio`
+requires the cert as a PEM-encoded root CA:
+
+```python
+import ssl, socket
+ctx = ssl.create_default_context()
+ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+with socket.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
+    with ctx.wrap_socket(s, server_hostname="localhost") as ts:
+        cert_pem = ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
+```
+
+### gRPC call
+
+```python
+import grpc
+creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
+opts = [("grpc.ssl_target_name_override","localhost"),
+        ("grpc.default_authority","localhost")]
+channel = grpc.secure_channel(f"127.0.0.1:{grpc_port}", creds, options=opts)
+stub = channel.unary_unary(
+    "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+    request_serializer=bytes, response_deserializer=bytes)
+resp = stub(b"", timeout=10)   # empty request; resp is raw protobuf bytes
+```
+
+Dependency: `pip install grpcio` (listed in `requirements.txt`). Wait **~4 s after
+port discovery** before calling — OAuth auth completes asynchronously inside agy.
+
+### Protobuf wire format (manual decode — no .proto file needed)
+
+The 1120-byte response decodes to this logical structure:
+
+```
+QuotaSummaryResponse {
+  field[1] (bytes) → QuotaSummaryPayload {
+    field[2] (bytes, repeated) → QuotaGroup {
+      field[1] (bytes, repeated) → QuotaBucket {
+        field[1] (bytes)   → bucket id  ("gemini-weekly", "gemini-5h", "3p-weekly", "3p-5h")
+        field[2] (bytes)   → display name ("Weekly Limit", "Five Hour Limit")
+        field[3] (bytes)   → period id  ("weekly", "5h")
+        field[4] (float32) → remaining fraction  0.0 – 1.0  (multiply by 100 for %)
+        field[6] (bytes)   → Timestamp sub-message { field[1] (varint) = Unix seconds }
+        field[7] (bytes)   → human-readable message (e.g. "Refreshes in 2 days, 7 hours")
+        field[8] (varint)  → is_hit bool (1 = limit reached)
+      }
+      field[2] (bytes) → group display name ("Gemini Models", "Claude and GPT models")
+      field[3] (bytes) → group description
+    }
+    field[3] (bytes) → top-level description
+  }
+}
+```
+
+Full manual decoder in `agy_models.py::_parse_quota_proto()`. Key: wire type 5 = 32-bit
+float, wire type 0 = varint, wire type 2 = length-delimited (string / sub-message).
+
+### Teardown
+
+Always kill the spawned agy process tree after the call:
+
+```python
+subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_C)
+```
+
+### What you get (example values, 2026-06-16)
+
+| Group | Limit | Remaining | Reset |
+|---|---|---|---|
+| Gemini Models | Weekly | 40.1% | ~56 h |
+| Gemini Models | Five-Hour | 100.0% | n/a |
+| Claude and GPT models | Weekly | 0.0% (hit) | ~46 h |
+| Claude and GPT models | Five-Hour | 100.0% (hit flag) | n/a |
+
+### Also tried and ruled out
+
+- **REST `/v1internal:retrieveUserQuotaSummary`** on `cloudcode-pa` → **403
+  PERMISSION_DENIED** with user OAuth token; this endpoint requires the language
+  server's internal credentials.
+- **ConPTY `/usage`** injection → first Enter selects autocomplete (fills input),
+  second Enter triggers "No matches" — the command never executes. Dead end.
+
+---
+
+## 6. Method D — headless prompt round-trip (`agy --print`)
 
 For delegating a prompt and reading the answer (this is what the MCP server does).
 See `agy_client.py::ask_agy()`.
@@ -143,7 +281,7 @@ See `agy_client.py::ask_agy()`.
 
 ---
 
-## 6. Diagnostics & discovery
+## 7. Diagnostics & discovery
 
 - **`agy --log-file <path> models`** writes a verbose log: the OAuth flow, every
   backend URL hit, and the selected-model propagation. This is how the
@@ -153,7 +291,7 @@ See `agy_client.py::ask_agy()`.
 
 ---
 
-## 7. pytermgui gotchas (all hit & fixed in `tui.py`)
+## 8. pytermgui gotchas (all hit & fixed in `tui.py`)
 
 These are pytermgui quirks that crash or misrender; the fixes are in the code.
 
@@ -186,11 +324,13 @@ These are pytermgui quirks that crash or misrender; the fixes are in the code.
 
 ---
 
-## 8. Pending tasks
+## 9. Pending tasks
 
-1. **Interactive Chat session / logs**: Hook up chat session launching or log printing inside the TUI directly.
+1. **Interactive Chat session / logs**: Hook up chat session launching or log
+   printing inside the TUI directly.
 2. **Interactive OAuth triggers**: Wire the OAuth triggers in TUI directly if needed.
 3. Decide whether to keep the crash-logging hook for release.
-4. `requirements.txt` lists `mcp[cli]`, `pytermgui` but `tui.py` also needs
-   `pywin32` (`win32cred`); add it if not implied.
+4. `requirements.txt` now lists `mcp[cli]`, `pytermgui`, and `grpcio`.
+   `tui.py` also uses `pywin32` (`win32cred`) — add it explicitly if not implied
+   by another dep.
 
