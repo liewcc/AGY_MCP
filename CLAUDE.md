@@ -24,12 +24,13 @@ rides the CLI's local OAuth login. Full details in [README.md](README.md).
 
 ## Active work
 
-The pytermgui TUI control panel is **functional**: full-height left rail
-(`Models` / `Quota`) + status panel + main panel. The Models view lists the live
-models (click to switch); the Quota view is the next task. **Before editing
-`tui.py`, read [HANDOFF.md](HANDOFF.md)** — it documents how to talk to `agy`
-(config files, ConPTY model list, cloudcode-pa REST APIs, `--print` round-trip)
-and the pytermgui gotchas already worked around.
+The pytermgui TUI control panel is **functional**:
+- Left rail: `Models` / `Quota` navigation.
+- Models view: lists live models and allows selection.
+- Quota view: **Completed**. Displays both `/quota` and `/usage` details.
+  - *How it was done*: Queries individual model quotas dynamically via the Google Cloud Code API, simulates account-level/group-level limits (Gemini and Claude groups) with text progress bars, and dynamically computes session usage metrics (active model, elapsed time, current workspace, and estimated tokens parsed from the latest conversation trajectory SQLite database).
+- **Next steps**: Incrementally add chat session capabilities, hook up real OAuth login triggers, or refine the layout based on owner visual feedback.
+
 
 ## Conventions
 

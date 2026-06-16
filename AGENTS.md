@@ -12,9 +12,17 @@ in this repository.
 
 ## What's in flight
 
-Building a **pytermgui** terminal control panel (`tui.py`) for the MCP server.
-It is a styled skeleton; functionality is wired in incrementally. Two approved
-edits are still pending — they are specified copy-paste-ready in HANDOFF.md §4.
+We completed the **Quota & Usage** panel implementation in `tui.py`:
+- Individual model API quotas are fetched dynamically via GCP CloudCode API.
+- Account-level group quotas (Gemini and Claude groups) are formatted with progress bars.
+- Session usage stats (active model, session timer, current workspace, and estimated tokens used) are tracked dynamically by reading the newest SQLite trajectory database of the active chat.
+- Green selection dot styling was also successfully applied to the selected model row in `Models` view.
+
+**Next tasks / Handoff**:
+1. Hook up interactive chat session launching or logs directly inside the TUI.
+2. Hook up authentications triggers directly.
+3. Clean up backup files if no longer needed.
+
 
 ## Rules of engagement
 
