@@ -11,18 +11,23 @@ Run it with `run.bat`, or directly:
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 
 import pytermgui as ptg
 import win32cred
+
+from agy_models import list_models
 
 # Where the Antigravity CLI lives. Mirrors AGY_BIN in agy_client.py so the
 # panel reports the same path the server actually uses.
@@ -38,14 +43,57 @@ PROFILE_EMAIL = "(not signed in)"
 # Reference to the profile label widget for real-time updates.
 PROFILE_LABEL: ptg.Label | None = None
 
-# Reference to the status panel container.
-STATUS_PANEL: ptg.Container | None = None
+# Reference to the right-hand content panel container.
+CONTENT_PANEL: ptg.Container | None = None
+
+# Sidebar item widgets, keyed by view name ("Models" / "Quota").
+SIDEBAR_ITEMS: dict[str, "FlatButtonContainer"] = {}
+
+# The sidebar container (left column).
+SIDEBAR_BOX: ptg.Container | None = None
+
+# Which sidebar view is currently active.
+ACTIVE_VIEW: str = "Models"
+
+# Live model list (fetched from `agy models`), and whether a fetch is in flight.
+# Never persisted — refreshed from agy each session.
+MODELS_CACHE: list[str] = []
+MODELS_LOADING: bool = False
+
+# Rendered height (rows) of the status panel C — measured at build time so the
+# left rail B and the main panel D can be padded to the same total height.
+STATUS_H: int = 7
 
 # The active WindowManager instance.
 ACTIVE_MANAGER: ptg.WindowManager | None = None
 
 # One uniform grey for every frame / divider.
 BORDER = "240"
+
+# Uncaught exceptions (any thread) are appended here so crashes can be diagnosed
+# even though the TUI runs on the alternate screen buffer.
+CRASH_LOG = Path(__file__).with_name("tui_crash.log")
+
+
+def _log_exc(where: str, exc: BaseException | None = None) -> None:
+    """Append a traceback to CRASH_LOG."""
+    try:
+        with open(CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n==== {datetime.datetime.now().isoformat()} [{where}] ====\n")
+            if exc is not None:
+                traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
+            else:
+                traceback.print_exc(file=f)
+    except Exception:
+        pass
+
+
+def _install_crash_logging() -> None:
+    """Route uncaught exceptions from every thread into CRASH_LOG."""
+    sys.excepthook = lambda t, v, tb: _log_exc("main", v)
+    threading.excepthook = lambda args: _log_exc(
+        f"thread:{args.thread_name}", args.exc_value
+    )
 
 
 class FlatLabel(ptg.Label):
@@ -182,39 +230,52 @@ def on_logout_click(button: ptg.Widget) -> None:
 
 
 def _update_profile_loop(manager: ptg.WindowManager) -> None:
-    """Background loop to poll login status and update the UI in real-time."""
+    """Background loop: poll login status and the selected model so the UI
+    reflects external changes (e.g. running `/model` in a separate terminal)."""
     last_email = None
-    last_selected_model = None
-    
+    last_model = None
+
     while True:
         try:
             email = check_email_now()
         except Exception:
             email = None
-            
+
         display_email = email if email else "(not signed in)"
-        selected_model = get_selected_model() if email else None
-        
-        if display_email != last_email or selected_model != last_selected_model:
+        selected_model = get_selected_model()
+        dirty = False
+
+        if display_email != last_email:
             last_email = display_email
-            last_selected_model = selected_model
             global PROFILE_LABEL
             if PROFILE_LABEL:
                 PROFILE_LABEL.value = f"[dim]current log in profile:  [247]{display_email}"
-            
-            update_status_ui(email)
-            
-            if manager:
-                try:
-                    manager.compositor.redraw()
-                except Exception:
-                    pass
+            dirty = True
+
+        # External model switch → move the selection dot in the Models view.
+        if selected_model != last_model:
+            last_model = selected_model
+            if ACTIVE_VIEW == "Models" and MODELS_CACHE:
+                update_content_ui("Models")
+            dirty = True
+
+        if dirty and manager:
+            try:
+                manager.compositor.redraw()
+            except Exception:
+                pass
         time.sleep(3)
+
+
+class _Frame(ptg.Container):
+    """A bordered box. Subclassed so pytermgui's Splitter doesn't apply its
+    name-based ``+1`` row fudge (which only triggers for the exact type
+    "Container") when this box is used as a direct Splitter child."""
 
 
 def _framed(*widgets) -> ptg.Container:
     """A single-line box with a uniform grey border."""
-    box = ptg.Container(*widgets, box="SINGLE")
+    box = _Frame(*widgets, box="SINGLE")
     box.styles.border = BORDER
     box.styles.corner = BORDER
     return box
@@ -225,6 +286,12 @@ def _split(*widgets) -> ptg.Splitter:
     sp = ptg.Splitter(*widgets)
     sp.styles.separator = BORDER
     sp.styles.fill = lambda depth, item: item  # prevent pytermgui from parsing/corrupting ANSI codes
+    # pytermgui's Splitter.keys omits scroll bindings, yet it inherits
+    # Container.handle_key which *unconditionally* reads keys["scroll_down"/"up"]
+    # at the top of every keypress → KeyError (crash) whenever a key is routed to
+    # the splitter (e.g. a mouse-wheel scroll over a selected model row). Give it
+    # empty scroll sets so the lookup succeeds and the branch is simply skipped.
+    sp.keys = {**sp.keys, "scroll_down": set(), "scroll_up": set()}
     return sp
 
 
@@ -245,6 +312,7 @@ class FlatButtonContainer(ptg.Container):
     def __init__(self, label: str, onclick, **attrs):
         self._is_pressed = False
         self._is_hovered = False
+        self.active = False
         self.label_widget = FlatLabel(label)
         self.label_widget.parent_align = ptg.HorizontalAlignment.CENTER
         
@@ -310,7 +378,7 @@ class FlatButtonContainer(ptg.Container):
     def get_lines(self) -> list[str]:
         if self._is_pressed:
             self.set_state("clicked")
-        elif self._is_hovered or self.selected_index is not None:
+        elif self.active or self._is_hovered or self.selected_index is not None:
             self.set_state("hover")
         else:
             self.set_state("normal")
@@ -326,9 +394,41 @@ def _flat_button(label: str, onclick) -> FlatButtonContainer:
     return FlatButtonContainer(label, onclick)
 
 
+class _Column(ptg.Container):
+    """A borderless column for use inside the main Splitter.
+
+    Subclassing matters for two reasons:
+
+    1. pytermgui's Splitter adds a +1 row to the stored position of any child
+       whose ``type(...).__name__ == "Container"`` (a fudge meant for *bordered*
+       containers). For our EMPTY-box columns that +1 makes hover/click hit the
+       neighbouring row. A subclass dodges that name check, so a widget's stored
+       position matches where it is actually drawn.
+
+    2. The Compositor draws on its own thread, while click/background handlers
+       call ``set_widgets`` on the main/worker threads. ``set_widgets`` does
+       ``self._widgets = []`` then appends one by one, so the draw thread can be
+       iterating the list mid-rebuild → ``RuntimeError: list changed size during
+       iteration`` → the TUI dies. A per-column re-entrant lock serialises
+       ``set_widgets`` against ``get_lines`` to prevent that.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._mutate_lock = threading.RLock()
+        super().__init__(*args, **kwargs)
+
+    def set_widgets(self, new: list[ptg.Widget]) -> None:
+        with self._mutate_lock:
+            super().set_widgets(new)
+
+    def get_lines(self) -> list[str]:
+        with self._mutate_lock:
+            return super().get_lines()
+
+
 def _status_box(*widgets) -> ptg.Container:
     """A borderless container for sub-panels within the main splitter."""
-    c = ptg.Container(*widgets)
+    c = _Column(*widgets)
     c.box = "EMPTY"
     return c
 
@@ -348,84 +448,178 @@ def _account_card() -> ptg.Container:
     )
 
 
-def _status_panel() -> ptg.Container:
-    """Build the status panel container."""
-    global STATUS_PANEL
-    STATUS_PANEL = _status_box(
-        ptg.Label("[72 bold]Status"),
-        ptg.Label(""),
-        ptg.Label(f"{_dot(AGY_BIN.exists())} [247]agy.exe"),
-        ptg.Label(""),
-        ptg.Label(f"{_dot(True)} [247]default model"),
-        ptg.Label(f"   [dim]{DEFAULT_MODEL}"),
-    )
-    return STATUS_PANEL
+# Fixed width (in columns) of the left rail B, including its frame.
+SIDEBAR_WIDTH = 18
 
 
-def update_status_ui(email: str | None = None) -> None:
-    """Update the status panel widgets."""
-    global STATUS_PANEL
-    if not STATUS_PANEL:
+def _sidebar() -> ptg.Container:
+    """Left navigation: selectable 'Models' and 'Quota' items."""
+    global SIDEBAR_BOX
+    SIDEBAR_ITEMS.clear()
+    for name in ("Models", "Quota"):
+        btn = FlatButtonContainer(name, lambda _b, n=name: select_view(n), box="EMPTY")
+        btn.label_widget.parent_align = ptg.HorizontalAlignment.LEFT
+        SIDEBAR_ITEMS[name] = btn
+    SIDEBAR_BOX = _Column(*SIDEBAR_ITEMS.values(), box="EMPTY")
+    return SIDEBAR_BOX
+
+
+def _content_panel() -> ptg.Container:
+    """Right content area; populated by `select_view`."""
+    global CONTENT_PANEL
+    CONTENT_PANEL = _status_box(ptg.Label(""))
+    return CONTENT_PANEL
+
+
+def on_model_click(name: str) -> None:
+    """Select a model: write it to agy's settings.json and refresh the dots."""
+    try:
+        set_selected_model(name)
+        if ACTIVE_VIEW == "Models":
+            update_content_ui("Models")
+            if ACTIVE_MANAGER:
+                try:
+                    ACTIVE_MANAGER.compositor.redraw()
+                except Exception:
+                    pass
+    except Exception as exc:
+        _log_exc("on_model_click", exc)
+
+
+def _model_row(name: str, selected: bool) -> FlatButtonContainer:
+    """One clickable model line; a dot marks the active selection."""
+    dot = "● " if selected else "  "
+    row = FlatButtonContainer(dot + name, lambda _b, n=name: on_model_click(n), box="EMPTY")
+    row.label_widget.parent_align = ptg.HorizontalAlignment.LEFT
+    return row
+
+
+def _fetch_models_async() -> None:
+    """Fetch the live model list off the UI thread, then re-render Models."""
+    global MODELS_LOADING
+    if MODELS_LOADING:
         return
-    agy_ok = AGY_BIN.exists()
-    model = DEFAULT_MODEL
-    if email is None:
-        email = check_email_now()
-    if email:
-        model = get_selected_model() or DEFAULT_MODEL
-        
-    widgets = [
-        ptg.Label("[72 bold]Status"),
-        ptg.Label(""),
-        ptg.Label(f"{_dot(agy_ok)} [247]agy.exe"),
-        ptg.Label(""),
-        ptg.Label(f"{_dot(True)} [247]default model"),
-        ptg.Label(f"   [dim]{model}"),
-    ]
-    STATUS_PANEL.set_widgets(widgets)
+    MODELS_LOADING = True
+
+    def work() -> None:
+        global MODELS_CACHE, MODELS_LOADING
+        try:
+            models = list_models()
+        except Exception:
+            models = []
+        if models:
+            MODELS_CACHE = models
+        MODELS_LOADING = False
+        if ACTIVE_VIEW == "Models":
+            update_content_ui("Models")
+            if ACTIVE_MANAGER:
+                try:
+                    ACTIVE_MANAGER.compositor.redraw()
+                except Exception:
+                    pass
+
+    threading.Thread(target=work, daemon=True).start()
 
 
-def _tools_panel() -> ptg.Container:
-    return _status_box(
-        "[72 bold]MCP Tools",
-        "",
-        "[247]ask_antigravity",
-        "[dim]   send one prompt, get the answer",
-        "[247]list_conversations",
-        "[dim]   recent sessions, newest first",
-        "[247]read_conversation",
-        "[dim]   full transcript by id",
-    )
+def _content_widgets(view: str) -> list[ptg.Widget]:
+    """Widgets shown in the content panel for a given view."""
+    if view == "Quota":
+        # Empty for now — wired to the quota API in a later step.
+        return [ptg.Label("")]
+
+    # Models view.
+    if not MODELS_CACHE:
+        msg = "Loading models…" if MODELS_LOADING else "(no models — signed in?)"
+        return [ptg.Label("[72 bold]Models"), ptg.Label(""), ptg.Label(f"[dim]{msg}")]
+    selected = get_selected_model()
+    rows: list[ptg.Widget] = [ptg.Label("[72 bold]Models"), ptg.Label("")]
+    for name in MODELS_CACHE:
+        rows.append(_model_row(name, name == selected))
+    return rows
+
+
+def update_content_ui(view: str) -> None:
+    """Render the content panel for the active sidebar view, padding the left
+    rail B and the main panel D so both Splitter columns are the same height.
+
+    Layout per column (lines):
+        B  = frame(2) + sidebar rows
+        right = status C + blank(1) + frame(2) + content rows
+    We make both equal to ``body_h`` (fills the terminal height, or grows to fit
+    the content on a short terminal). The Splitter mis-pads unequal columns, so
+    equal heights are required.
+    """
+    if not (CONTENT_PANEL and SIDEBAR_BOX):
+        return
+    content = _content_widgets(view)
+    content_rows = len(content)
+    # right column height = STATUS_H + 1 (gap) + 2 (frame) + content_rows
+    body_h = max(content_rows + STATUS_H + 3, ptg.terminal.height - 6)
+    content_h = body_h - STATUS_H - 3   # rows inside D's frame
+    sidebar_h = body_h - 2              # rows inside B's frame
+
+    content += [ptg.Label("") for _ in range(content_h - content_rows)]
+    sidebar: list[ptg.Widget] = list(SIDEBAR_ITEMS.values())
+    sidebar += [ptg.Label("") for _ in range(sidebar_h - len(sidebar))]
+    CONTENT_PANEL.set_widgets(content)
+    SIDEBAR_BOX.set_widgets(sidebar)
+
+
+def select_view(view: str) -> None:
+    """Activate a sidebar view and refresh the content panel."""
+    global ACTIVE_VIEW
+    ACTIVE_VIEW = view
+    for name, btn in SIDEBAR_ITEMS.items():
+        btn.active = (name == view)
+    # Fetch the model list on demand (off the UI thread). Gated on a running
+    # manager so build_window() stays pure / TTY-free for smoke tests.
+    if view == "Models" and not MODELS_CACHE and ACTIVE_MANAGER:
+        _fetch_models_async()
+    update_content_ui(view)
+    if ACTIVE_MANAGER:
+        try:
+            ACTIVE_MANAGER.compositor.redraw()
+        except Exception:
+            pass
 
 
 def _window_width() -> int:
-    """Fixed default width of 80, capped to the terminal width."""
-    term_w = ptg.terminal.width
-    return min(80, term_w - 2)
+    """Fill the terminal width (minus a small margin) so the main panel is wide
+    enough to show full model names. Floored so a tiny terminal still renders."""
+    return max(60, ptg.terminal.width - 2)
 
 
 def build_window() -> ptg.Window:
     """Build the main window. Pure construction — no terminal required,
-    so it can be smoke-imported without a live TTY."""
-    ask_box = _framed(ptg.InputField("", prompt="[72]Ask  [/]"))
+    so it can be smoke-imported without a live TTY.
 
-    status_box = _status_panel()
+    Layout: a full-height left rail B (sidebar) beside a right column that
+    stacks the status panel C over the main panel D.
+    """
+    global STATUS_H
 
-    panels = _split(status_box, _tools_panel())
-    panels.chars["separator"] = "│"   # single connected line, NO spaces
-    panels_box = _framed(panels)      # one grey outer box around both columns
+    b_panel = _framed(_sidebar())          # B — full-height left rail
+    b_panel.size_policy = ptg.SizePolicy.STATIC
+    b_panel.width = SIDEBAR_WIDTH
+
+    status = _account_card()               # C — status panel (top-right)
+    status.width = 50
+    STATUS_H = len(status.get_lines())     # measure so B/D pad to matching height
+
+    d_panel = _framed(_content_panel())    # D — main panel (bottom-right)
+    right = _Column(status, "", d_panel, box="EMPTY")
+
+    body = _split(b_panel, right)
+    body.chars["separator"] = " "          # frames draw the borders; just a gap
+
+    # Render the default view and mark its sidebar item active (also pads heights).
+    select_view(ACTIVE_VIEW)
 
     win = (
         ptg.Window(
-            _account_card(),
+            body,
             "",
-            panels_box,
-            "",
-            ask_box,
-            # Placeholder action — wired to ask_antigravity in a later step.
-            FlatButtonContainer("Send", lambda *_: None, box="EMPTY"),
-            "",
-            "[dim]ctrl+c quit   ·   tab to move   ·   skeleton — features coming",
+            "[dim]ctrl+c quit   ·   tab to move",
             width=_window_width(),
             box="DOUBLE",
         )
@@ -439,13 +633,17 @@ def build_window() -> ptg.Window:
 
 def main() -> None:
     global ACTIVE_MANAGER
+    _install_crash_logging()
     with ptg.WindowManager() as manager:
         ACTIVE_MANAGER = manager
         manager.add(build_window())
-        
+
+        # Preload the live model list (default view is Models).
+        _fetch_models_async()
+
         # Start background profile update thread
         threading.Thread(target=_update_profile_loop, args=(manager,), daemon=True).start()
-        
+
         manager.run()
 
 
