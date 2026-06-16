@@ -1,5 +1,5 @@
 @echo off
-title AGY MCP - Server
+title AGY MCP - Control Panel
 cd /d "%~dp0"
 
-python server.py
+python tui.py

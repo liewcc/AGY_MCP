@@ -1,2 +1,5 @@
 # MCP server framework (FastMCP + CLI helpers)
 mcp[cli]
+
+# Terminal UI control panel (only dep is wcwidth — tiny footprint)
+pytermgui
