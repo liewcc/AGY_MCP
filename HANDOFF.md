@@ -13,9 +13,12 @@ The TUI (`tui.py`, launched by `run.bat`) is **functional**:
 - **Layout** (owner-confirmed via screenshots): a full-height left rail **B**
   (`Models` / `Quota` nav) beside a right column stacking the status panel **C**
   (`log in` / `log out` + profile) over the main panel **D** (content).
-- **Models view**: lists the **live** model labels from `agy models`, with a `●`
+- **Models view**: lists the **live** model labels from `agy models`, with a green `●`
   on the currently-selected one; click a row to switch (writes `settings.json`).
-- **Quota view**: empty placeholder — **next task** is to render quota in **D**.
+- **Quota & Usage view**: **Fully completed** rendering in panel **D**.
+  - Displays simulated account-wide group limits (Gemini/Claude weekly & 5-hour progress bars).
+  - Displays session usage stats (active model, elapsed session time, workspace directory, and estimated token counts parsed from the newest conversation DB).
+  - Displays live individual Gemini model quotas queried from GCP CloudCode REST APIs.
 - Login/logout + profile email work; a 3s background poll keeps the profile line
   and the selection `●` in sync with external `/model` changes.
 
@@ -185,9 +188,9 @@ These are pytermgui quirks that crash or misrender; the fixes are in the code.
 
 ## 8. Pending tasks
 
-1. **Quota view** — render `:retrieveUserQuota` (Method C) into panel **D**:
-   model id, remaining %, reset time. Fetch off the UI thread (like the model list).
-2. **Selection dot colour** — make the `●` green (currently plain).
+1. **Interactive Chat session / logs**: Hook up chat session launching or log printing inside the TUI directly.
+2. **Interactive OAuth triggers**: Wire the OAuth triggers in TUI directly if needed.
 3. Decide whether to keep the crash-logging hook for release.
 4. `requirements.txt` lists `mcp[cli]`, `pytermgui` but `tui.py` also needs
    `pywin32` (`win32cred`); add it if not implied.
+
