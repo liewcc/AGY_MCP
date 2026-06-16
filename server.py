@@ -9,11 +9,21 @@ Normally launched over stdio by the MCP client (see README).
 """
 import asyncio
 import datetime
+import os
+import sys
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from agy_client import ask_agy
+# Startup breadcrumb — written before any MCP negotiation so we can tell if
+# Claude Code even launched the process.
+_log = os.path.join(os.path.dirname(__file__), "_startup.log")
+with open(_log, "a", encoding="utf-8") as _f:
+    _f.write(f"started pid={os.getpid()} cwd={os.getcwd()} "
+             f"python={sys.version.split()[0]}\n")
+
+from agy_client import ask_agy, run_agy_subcommand
+from agy_models import list_models as _list_models
 from conversations import format_transcript as _format_transcript
 from conversations import list_conversations as _list_conversations
 
@@ -27,6 +37,7 @@ async def ask_antigravity(
     add_dirs: Optional[list[str]] = None,
     timeout: Optional[int] = None,
     conversation: Optional[str] = None,
+    working_dir: Optional[str] = None,
 ) -> dict:
     """Send a prompt to the Antigravity CLI (Google's Gemini CLI) and get its answer.
 
@@ -46,12 +57,13 @@ async def ask_antigravity(
                       separate upload mechanism.
         timeout:      Hard cap in seconds before the call is abandoned (default 120).
         conversation: Conversation id to resume; omit to start a fresh conversation.
+        working_dir:  Optional working directory path to run the command in.
 
     Returns:
         {"answer": <model text>, "conversation_id": <id to continue this thread>}
     """
     answer, conv_id = await asyncio.to_thread(
-        ask_agy, prompt, model, add_dirs, timeout, conversation
+        ask_agy, prompt, model, add_dirs, timeout, conversation, working_dir
     )
     return {"answer": answer, "conversation_id": conv_id}
 
@@ -87,6 +99,65 @@ async def read_conversation(conversation_id: str) -> str:
         A readable transcript with alternating USER / MODEL turns.
     """
     return await asyncio.to_thread(_format_transcript, conversation_id)
+
+
+@mcp.tool()
+async def list_models() -> list[str]:
+    """List all available Antigravity CLI models."""
+    return await asyncio.to_thread(_list_models)
+
+
+@mcp.tool()
+async def get_changelog() -> str:
+    """Show the Antigravity CLI changelog and release notes."""
+    return await asyncio.to_thread(run_agy_subcommand, "changelog")
+
+
+@mcp.tool()
+async def list_plugins() -> str:
+    """List all installed/imported Antigravity CLI plugins."""
+    return await asyncio.to_thread(run_agy_subcommand, "plugin", "list")
+
+
+@mcp.tool()
+async def import_plugins(source: Optional[str] = None) -> str:
+    """Import plugins from gemini or claude.
+
+    Args:
+        source: 'gemini' or 'claude'. Omit to import from all sources.
+    """
+    args = ["plugin", "import"]
+    if source:
+        args.append(source)
+    return await asyncio.to_thread(run_agy_subcommand, *args)
+
+
+@mcp.tool()
+async def install_plugin(target: str) -> str:
+    """Install an Antigravity CLI plugin.
+
+    Args:
+        target: Local path to a plugin directory, or 'plugin@marketplace' format.
+    """
+    return await asyncio.to_thread(run_agy_subcommand, "plugin", "install", target, timeout=60)
+
+
+@mcp.tool()
+async def uninstall_plugin(name: str) -> str:
+    """Uninstall a plugin by name."""
+    return await asyncio.to_thread(run_agy_subcommand, "plugin", "uninstall", name)
+
+
+@mcp.tool()
+async def enable_plugin(name: str) -> str:
+    """Enable a previously disabled plugin."""
+    return await asyncio.to_thread(run_agy_subcommand, "plugin", "enable", name)
+
+
+@mcp.tool()
+async def disable_plugin(name: str) -> str:
+    """Disable a plugin without uninstalling it."""
+    return await asyncio.to_thread(run_agy_subcommand, "plugin", "disable", name)
 
 
 if __name__ == "__main__":

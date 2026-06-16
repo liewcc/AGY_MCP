@@ -692,6 +692,15 @@ def _fetch_quota_summary_async() -> None:
     threading.Thread(target=_work, daemon=True).start()
 
 
+def on_quota_reload_click(button: ptg.Widget) -> None:
+    global QUOTA_CACHE, QUOTA_SUMMARY_CACHE
+    QUOTA_CACHE = []
+    QUOTA_SUMMARY_CACHE = None
+    _fetch_quota_async()
+    _fetch_quota_summary_async()
+    _redraw_quota()
+
+
 TUI_START_TIME = time.time()
 
 
@@ -754,7 +763,10 @@ def _content_widgets(view: str) -> list[ptg.Widget]:
         def _color(pct: float) -> str:
             return "210" if pct < 10 else ("220" if pct < 40 else "120")
 
+        reload_btn = FlatButtonContainer("  ↻ reload", on_quota_reload_click, box="EMPTY")
+        reload_btn.label_widget.parent_align = ptg.HorizontalAlignment.LEFT
         rows: list[ptg.Widget] = [
+            reload_btn,
             ptg.Label("[72 bold]Account Group Limits"),
             ptg.Label(""),
         ]

@@ -153,6 +153,7 @@ def ask_agy(
     add_dirs=None,
     timeout: int | None = None,
     conversation: str | None = None,
+    working_dir: str | None = None,
 ):
     """Run one headless prompt through the Antigravity CLI and return (answer, conv_id).
 
@@ -166,6 +167,8 @@ def ask_agy(
         conversation: Conversation id to resume (`--conversation <id>`); the reply is
                       appended to the same conversation so context carries over. If
                       None, a fresh conversation is started.
+        working_dir:  Optional working directory path to run the command in. If omitted,
+                      uses _resolve_trusted_cwd().
 
     Returns:
         (answer_text, conversation_id) — pass conversation_id back in to continue.
@@ -174,7 +177,7 @@ def ask_agy(
     timeout = timeout or DEFAULT_TIMEOUT
     if not os.path.isfile(AGY_BIN):
         raise RuntimeError(f"agy.exe not found at {AGY_BIN!r} (set AGY_BIN to override).")
-    cwd = _resolve_trusted_cwd()
+    cwd = os.path.normpath(working_dir) if working_dir else _resolve_trusted_cwd()
 
     args = [AGY_BIN, "--model", model, "--dangerously-skip-permissions"]
     if conversation:
@@ -211,6 +214,26 @@ def ask_agy(
     raise RuntimeError(
         f"agy produced an empty answer (dbs touched: {[os.path.basename(p) for p in touched]})."
     )
+
+
+def run_agy_subcommand(*args: str, timeout: int = 30) -> str:
+    """Run an agy subcommand and return its stdout+stderr as a string."""
+    cmd = [AGY_BIN] + list(args)
+    try:
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        output = res.stdout or ""
+        if res.returncode != 0:
+            output += f"\nExit code: {res.returncode}"
+        return output
+    except subprocess.TimeoutExpired:
+        return f"Timed out after {timeout}s"
 
 
 if __name__ == "__main__":

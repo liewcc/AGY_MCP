@@ -6,7 +6,31 @@ add features against `agy` using only this document.
 
 ---
 
-## 0. Current state (2026-06-16)
+## 0. Current state (2026-06-17)
+
+### 本次会话新增
+
+**新建 `DELEGATION.md`**（项目根目录）：三方分工指南，供 Claude 自用。
+- **gemi-mcp**：上网搜索（需先 `apply_settings(tool="Google Search")`）、图片生成、文件多模态分析。控制 Gemini 网页 UI，依赖 engine_service.py port 18800。
+- **agy-mcp**：代码写入、文件修改、git 操作，用 `ask_antigravity`。
+- **Claude**：设计决策、复杂推理、最终验证。
+
+**`working_dir` 参数已完成**（`agy_client.py` + `server.py`）：
+
+`ask_antigravity` 现在接受可选 `working_dir` 参数。传入目标项目路径后，agy 以该目录
+为 workspace 启动——完整扫描项目树、git 操作落在正确 repo、相对路径工具全部正常。
+不传则沿用 `_resolve_trusted_cwd()`（旧行为）。`working_dir` 是每次调用时传入的参数，
+可随时指向不同项目。`GEMINI_CLI_TRUST_WORKSPACE=true` 已在环境变量里，无需额外 trust。
+
+**TUI 新增 Quota 页 reload 按钮**（`tui.py`）：点击 `↻ reload` 强制刷新配额数据。
+
+**已知 next steps**：
+- 重启 agy-mcp server 后 `working_dir` 参数才对 MCP client 可见。
+- 可考虑为 TUI 增加 chat session 启动或日志查看功能。
+
+---
+
+## 0b. Original state (2026-06-16)
 
 The TUI (`tui.py`, launched by `run.bat`) is **functional**:
 

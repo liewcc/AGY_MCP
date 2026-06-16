@@ -22,11 +22,18 @@ The **Quota & Usage** panel (`tui.py` Quota view) is **complete with real data**
   the newest conversation SQLite DB.
 - **Individual Model Quotas** — daily request counts from the REST
   `retrieveUserQuota` endpoint.
+- **Reload button** — `↻ reload` in the Quota view forces a live refresh.
+
+**Delegation strategy** (`DELEGATION.md`) — three-party split for token efficiency:
+- **gemi-mcp**: web search (`apply_settings(tool="Google Search")` first), image gen, multimodal file analysis.
+- **agy-mcp** (`ask_antigravity`): code writes, file edits, git ops. Pass `working_dir` to set the target project as agy's workspace (full project scan, correct git repo, relative paths all work). Parameter is per-call, can point to any project each time.
+- **Claude**: design decisions, complex reasoning, final verification.
 
 **Next tasks**:
-1. Hook up interactive chat session launching or log printing inside the TUI.
-2. Wire OAuth triggers in the TUI if needed.
-3. Clean up obsolete backup files (`tui.sidebar-layout.bak.py`).
+1. Restart agy-mcp server so MCP clients see the new `working_dir` parameter.
+2. Hook up interactive chat session launching or log printing inside the TUI.
+3. Wire OAuth triggers in the TUI if needed.
+4. Clean up obsolete backup files (`tui.sidebar-layout.bak.py`).
 
 ---
 
