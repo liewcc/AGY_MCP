@@ -588,6 +588,252 @@ def get_quota_summary(deadline_s: float = 20.0) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Context stats — used by TUI Content panel
+# ---------------------------------------------------------------------------
+
+_CONTEXT_LIMITS: dict[str, int] = {
+    "claude": 200_000,
+    "gpt": 128_000,
+}
+
+
+def _model_context_limit(model_name: str) -> int:
+    ml = (model_name or "").lower()
+    for key, limit in _CONTEXT_LIMITS.items():
+        if key in ml:
+            return limit
+    return 1_048_576  # Gemini default
+
+
+def get_live_conversation_id() -> str | None:
+    """Return the best conversation_id to show in the Content panel.
+
+    Priority:
+      1. A gRPC-detected interactive session whose .db has gen_metadata
+         (user has already sent at least one prompt)
+      2. The most recently modified .db that has gen_metadata
+         (covers headless agy-mcp sessions and past interactive sessions)
+    A gRPC session with an empty .db is skipped — it's a fresh session
+    with no context yet, which is less useful than a session with real data.
+    """
+    def _has_gen_metadata(cid: str) -> bool:
+        path = os.path.join(CONV_DIR, cid + ".db")
+        if not os.path.isfile(path):
+            return False
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                count = con.execute("SELECT COUNT(*) FROM gen_metadata").fetchone()[0]
+                return count > 0
+            finally:
+                con.close()
+        except Exception:
+            return False
+
+    # 1. Check gRPC interactive sessions (prefer ones with real data)
+    if grpc is not None:
+        for port in _listen_ports(_agy_pids()):
+            try:
+                ch = _grpc_channel(port)
+            except Exception:
+                continue
+            try:
+                cid = _active_conversation(ch, None)
+                if cid and _has_gen_metadata(cid):
+                    return cid
+            except Exception:
+                pass
+            finally:
+                try:
+                    ch.close()
+                except Exception:
+                    pass
+
+    # 2. Fall back to most recently modified .db with gen_metadata
+    for path in sorted(
+        glob.glob(os.path.join(CONV_DIR, "*.db")),
+        key=os.path.getmtime, reverse=True,
+    ):
+        cid = os.path.splitext(os.path.basename(path))[0]
+        if _has_gen_metadata(cid):
+            return cid
+
+    return None
+
+
+def _parse_gen_metadata_tokens(data: bytes) -> dict:
+    """Extract real token counts from gen_metadata protobuf blob.
+
+    Path: top.f1.f4 → token struct with fields:
+      f2 = prompt tokens (non-cached)
+      f3 = step token count
+      f5 = cached tokens
+    Total context used = f2 + f5 (from latest row).
+    """
+    def get_field_bytes(buf: bytes, target_fn: int) -> bytes | None:
+        i = 0
+        while i < len(buf):
+            try:
+                tag, i = _varint(buf, i)
+            except Exception:
+                break
+            fn, wt = tag >> 3, tag & 7
+            if wt == 0:
+                _, i = _varint(buf, i)
+            elif wt == 1:
+                i += 8
+            elif wt == 5:
+                i += 4
+            elif wt == 2:
+                ln, i2 = _varint(buf, i)
+                chunk = buf[i2:i2 + ln]
+                i = i2 + ln
+                if fn == target_fn:
+                    return chunk
+            else:
+                break
+        return None
+
+    def parse_varints(buf: bytes) -> dict:
+        result: dict = {}
+        i = 0
+        while i < len(buf):
+            try:
+                tag, i = _varint(buf, i)
+            except Exception:
+                break
+            fn, wt = tag >> 3, tag & 7
+            if wt == 0:
+                v, i = _varint(buf, i)
+                result[fn] = v
+            elif wt == 1:
+                i += 8
+            elif wt == 5:
+                i += 4
+            elif wt == 2:
+                ln, i2 = _varint(buf, i)
+                i = i2 + ln
+            else:
+                break
+        return result
+
+    f1 = get_field_bytes(data, 1)
+    if f1 is None:
+        return {}
+    f4 = get_field_bytes(f1, 4)
+    if f4 is None:
+        return {}
+    return parse_varints(f4)
+
+
+def get_context_stats(conv_id: str | None = None) -> dict:
+    """Return context usage stats for the active or most recent conversation.
+
+    Priority:
+      1. conv_id explicitly provided
+      2. Live agy session via gRPC (get_live_conversation_id)
+      3. Most recently modified .db file (fallback)
+
+    Token counts are real values from gen_metadata (agy's actual tokenizer).
+    Total context = latest row's f2 (prompt tokens) + f5 (cached tokens).
+    Breakdown by step type uses each row's f3 (step token count).
+    """
+    live = False
+    if conv_id is None:
+        conv_id = get_live_conversation_id()
+        if conv_id:
+            live = True
+
+    if conv_id:
+        path = os.path.join(CONV_DIR, conv_id + ".db")
+    else:
+        dbs = sorted(
+            glob.glob(os.path.join(CONV_DIR, "*.db")),
+            key=os.path.getmtime, reverse=True,
+        )
+        if not dbs:
+            return {"error": "no conversations found"}
+        path = dbs[0]
+        conv_id = os.path.splitext(os.path.basename(path))[0]
+
+    if not os.path.isfile(path):
+        return {"error": f"conversation not found: {conv_id}"}
+
+    model = _settings_model() or "Gemini 3.5 Flash"
+    context_limit = _model_context_limit(model)
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            step_types = dict(con.execute(
+                "SELECT idx, step_type FROM steps"
+            ).fetchall())
+            gen_rows = con.execute(
+                "SELECT idx, data FROM gen_metadata ORDER BY idx"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        return {"error": f"db read failed: {e}"}
+
+    if not gen_rows:
+        # Fresh session — no generation yet, matches agy /context showing 0 tokens
+        return {
+            "conversation_id": conv_id,
+            "live": live,
+            "model": model,
+            "context_limit": context_limit,
+            "user_tokens": 0,
+            "model_tokens": 0,
+            "tool_tokens": 0,
+            "total_tokens": 0,
+            "pct_used": 0.0,
+        }
+
+    # Per-step token counts for breakdown (f3 = step token count)
+    user_tokens = model_tokens = tool_tokens = 0
+    last_fields: dict = {}
+    for idx, data in gen_rows:
+        if not data:
+            continue
+        fields = _parse_gen_metadata_tokens(data)
+        if not fields:
+            continue
+        last_fields = fields
+        st = step_types.get(idx)
+        f3 = fields.get(3, 0)
+        if st == 14:
+            user_tokens += f3
+        elif st == 15:
+            model_tokens += f3
+        elif st == 33:
+            tool_tokens += f3
+
+    # Total context = latest row's f2 + f5
+    total_tokens = last_fields.get(2, 0) + last_fields.get(5, 0)
+
+    # Rescale breakdown proportionally to match total
+    raw_sum = user_tokens + model_tokens + tool_tokens
+    if raw_sum > 0 and total_tokens > 0:
+        scale = total_tokens / raw_sum
+        user_tokens = int(user_tokens * scale)
+        model_tokens = int(model_tokens * scale)
+        tool_tokens = int(tool_tokens * scale)
+
+    return {
+        "conversation_id": conv_id,
+        "live": live,
+        "model": model,
+        "context_limit": context_limit,
+        "user_tokens": user_tokens,
+        "model_tokens": model_tokens,
+        "tool_tokens": tool_tokens,
+        "total_tokens": total_tokens,
+        "pct_used": total_tokens / context_limit * 100 if context_limit else 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tier B — SQLite conversation management
 # ---------------------------------------------------------------------------
 

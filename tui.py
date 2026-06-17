@@ -18,7 +18,7 @@ from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, B
 from textual.widgets.option_list import Option
 from textual.reactive import reactive
 
-from agy_core import list_models, get_quota_summary
+from agy_core import list_models, get_quota_summary, get_context_stats
 
 # Configuration
 AGY_BIN = Path(
@@ -191,6 +191,84 @@ Features to implement:
         return f"[dim]Refreshes in {m}m[/dim]"
 
 
+class ContentPanel(Static):
+    """Context usage panel — mirrors /context command output."""
+
+    def compose(self) -> ComposeResult:
+        yield Button("↻ Reload", id="btn-reload-context")
+        yield Static("[dim]Loading context stats...[/dim]", id="context-content")
+
+    def on_mount(self) -> None:
+        self._load_async()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-reload-context":
+            try:
+                self.query_one("#context-content", Static).update("[dim]Loading...[/dim]")
+            except Exception:
+                pass
+            self._load_async()
+
+    def _load_async(self) -> None:
+        def work():
+            result = get_context_stats()
+            self.app.call_from_thread(self._apply, result)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply(self, data: dict) -> None:
+        text = f"[red]{data['error']}[/red]" if "error" in data else self._build_text(data)
+        try:
+            self.query_one("#context-content", Static).update(text)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fmt(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n/1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n/1_000:.0f}K"
+        return str(n)
+
+    def _build_text(self, d: dict) -> str:
+        limit = d["context_limit"]
+        total = d["total_tokens"]
+        pct = d["pct_used"]
+        user, model_t, tool = d["user_tokens"], d["model_tokens"], d["tool_tokens"]
+        free = max(0, limit - total)
+
+        # Grid: 40 cols × 5 rows = 200 cells
+        COLS, ROWS = 30, 5
+        cells = COLS * ROWS
+        filled = min(cells, int(pct / 100 * cells))
+        rows = []
+        for r in range(ROWS):
+            row = []
+            for c in range(COLS):
+                idx = r * COLS + c
+                row.append("[cyan]■[/cyan]" if idx < filled else "[dim]□[/dim]")
+            rows.append(" ".join(row))
+        grid = "\n".join(rows)
+
+        conv_id = d.get("conversation_id", "")
+        short_id = conv_id[:8] + "…" if len(conv_id) > 8 else conv_id
+        source = "[green]● live[/green]" if d.get("live") else "[dim]○ last session[/dim]"
+
+        f = self._fmt
+        p = lambda n: f"{n / max(limit, 1) * 100:.1f}%"
+
+        return (
+            f"[bold cyan]Context Usage[/bold cyan]  {source}\n\n"
+            f"[bold]{d['model']}[/bold] · {f(total)}/{f(limit)} tokens ({pct:.1f}%)\n\n"
+            f"{grid}\n\n"
+            f"[dim]Conversation:[/dim] {short_id}\n\n"
+            f"[cyan]●[/cyan] User messages:   {f(user):>6} tokens ({p(user)})\n"
+            f"[green]●[/green] Agent responses: {f(model_t):>6} tokens ({p(model_t)})\n"
+            f"[yellow]●[/yellow] Tool calls:      {f(tool):>6} tokens ({p(tool)})\n"
+            f"[dim]□  Free space:     {f(free):>6} ({p(free)})[/dim]"
+        )
+
+
 class CredentialPanel(Static):
     """Credential view: log in / log out buttons and CLI info."""
 
@@ -329,6 +407,7 @@ class AGYMCPApp(App):
                 yield ListItem(Label("🔑 Credential"), id="nav-credential")
                 yield ListItem(Label("📊 Models"), id="nav-models")
                 yield ListItem(Label("📈 Quota"), id="nav-quota")
+                yield ListItem(Label("📝 Content"), id="nav-content")
 
             # Right content area
             with Vertical(id="content-area"):
@@ -340,6 +419,7 @@ class AGYMCPApp(App):
                     yield CredentialPanel(id="credential-view", classes="panel-content")
                     yield ModelsPanel(id="models-view", classes="panel-content")
                     yield QuotaPanel(id="quota-view", classes="panel-content")
+                    yield ContentPanel(id="content-view", classes="panel-content")
 
         yield Footer()
 
@@ -358,6 +438,8 @@ class AGYMCPApp(App):
             switcher.current = "models-view"
         elif event.item.id == "nav-quota":
             switcher.current = "quota-view"
+        elif event.item.id == "nav-content":
+            switcher.current = "content-view"
 
     def _update_profile(self) -> None:
         """Update profile card with current email."""
