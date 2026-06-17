@@ -24,8 +24,11 @@ with open(_log, "a", encoding="utf-8") as _f:
 
 from agy_client import ask_agy, run_agy_subcommand
 from agy_models import list_models as _list_models
+from conversations import export_conversation as _export_conversation
+from conversations import fork_conversation as _fork_conversation
 from conversations import format_transcript as _format_transcript
 from conversations import list_conversations as _list_conversations
+from conversations import rewind_conversation as _rewind_conversation
 
 mcp = FastMCP("agy-mcp")
 
@@ -99,6 +102,61 @@ async def read_conversation(conversation_id: str) -> str:
         A readable transcript with alternating USER / MODEL turns.
     """
     return await asyncio.to_thread(_format_transcript, conversation_id)
+
+
+@mcp.tool()
+async def fork_conversation(conversation_id: str) -> dict:
+    """Clone an existing conversation into a new independent copy (/fork).
+
+    The new conversation starts with the same history as the source but gets a
+    fresh UUID, so future turns won't pollute the original.  Pass the returned
+    `new_conversation_id` to `ask_antigravity` to continue from the branch point.
+
+    Args:
+        conversation_id: The id of the conversation to clone.
+
+    Returns:
+        {"forked_from": <source_id>, "new_conversation_id": <new_id>}
+    """
+    return await asyncio.to_thread(_fork_conversation, conversation_id)
+
+
+@mcp.tool()
+async def rewind_conversation(conversation_id: str, turns: int = 1) -> dict:
+    """Remove the last N user turns (and their replies) from a conversation (/rewind).
+
+    Useful after a bad prompt: delete the last exchange and try a different
+    approach while keeping the earlier context intact.
+
+    Args:
+        conversation_id: The id of the conversation to rewind.
+        turns:           How many user turns to remove from the end (default 1).
+
+    Returns:
+        {"conversation_id", "turns_removed", "steps_deleted", "remaining_turns"}
+    Raises an error if the conversation has too few turns to rewind safely.
+    """
+    return await asyncio.to_thread(_rewind_conversation, conversation_id, turns)
+
+
+@mcp.tool()
+async def export_conversation(
+    conversation_id: str,
+    output_path: Optional[str] = None,
+) -> dict:
+    """Save a conversation transcript to a markdown file (/export).
+
+    Writes USER / MODEL turns with ### headers.  If `output_path` is omitted
+    the file is saved as <conversation_id>.md in the server's working directory.
+
+    Args:
+        conversation_id: The id of the conversation to export.
+        output_path:     Absolute path for the output file (optional).
+
+    Returns:
+        {"saved_to": <path>, "turns": <count>, "chars": <file_length>}
+    """
+    return await asyncio.to_thread(_export_conversation, conversation_id, output_path)
 
 
 @mcp.tool()
