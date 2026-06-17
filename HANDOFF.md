@@ -1,112 +1,41 @@
 # AGY_MCP — Handoff
 
-How to drive Google's **Antigravity CLI (`agy`)** from code, plus the current
-state of the pytermgui control panel (`tui.py`). The next agent should be able to
-add features against `agy` using only this document.
+调试细节、API 发现过程、pytermgui 踩坑记录。架构总览见
+[`agy_knowledge/architecture.md`](agy_knowledge/architecture.md)，
+斜线指令接入机制见
+[`agy_knowledge/command_access_tiers.md`](agy_knowledge/command_access_tiers.md)。
 
 ---
 
 ## 0. Current state (2026-06-17)
 
-### 本次会话新增
+**全部 39 个 MCP 工具已完成**（Tier A–F），含：
 
-**委托分工指南** [`agy_knowledge/delegation.md`](agy_knowledge/delegation.md)：三方分工指南，供 Claude 自用。
-- **gemi-mcp**：上网搜索（需先 `apply_settings(tool="Google Search")`）、图片生成、文件多模态分析。控制 Gemini 网页 UI，依赖 engine_service.py port 18800。
-- **agy-mcp**：代码写入、文件修改、git 操作，用 `ask_antigravity`。
-- **Claude**：设计决策、复杂推理、最终验证。
+| 层 | 机制 | 代码 |
+|----|------|------|
+| A | CLI flags + headless `--print` | `agy_client.py` |
+| B | SQLite fork/rewind/export | `conversations.py` |
+| C | 配置文件 read/write | `tier_c_commands.py` |
+| D | shell diff/open/logout + plugin | `tier_d_commands.py` |
+| E | gRPC attach（usage/tasks/agents） | `agy_models.py` / `tier_e_commands.py` |
+| F | ConPTY 伪终端（goal/planning/fast/schedule/btw/grill-me/teamwork） | `tier_f_commands.py` |
 
-**`working_dir` 参数已完成**（`agy_client.py` + `server.py`）：
+**TUI**（`tui.py`，由 `run.bat` 启动）功能完整：
+- Models 页：列出实时模型，点击切换（写 settings.json）
+- Quota 页：Group Limits（gRPC 真实配额）/ Session Usage（SQLite）/ 个人模型配额（REST）
+- Reload 按钮：强制刷新配额数据
 
-`ask_antigravity` 现在接受可选 `working_dir` 参数。传入目标项目路径后，agy 以该目录
-为 workspace 启动——完整扫描项目树、git 操作落在正确 repo、相对路径工具全部正常。
-不传则沿用 `_resolve_trusted_cwd()`（旧行为）。`working_dir` 是每次调用时传入的参数，
-可随时指向不同项目。`GEMINI_CLI_TRUST_WORKSPACE=true` 已在环境变量里，无需额外 trust。
-
-**TUI 新增 Quota 页 reload 按钮**（`tui.py`）：点击 `↻ reload` 强制刷新配额数据。
-
-**已知 next steps**：
-- 重启 agy-mcp server 后 `working_dir` 参数才对 MCP client 可见。
-- 可考虑为 TUI 增加 chat session 启动或日志查看功能。
-
----
-
-## 0a. 斜线指令外部接入 — Tier B/C/D/E 完成，F 待续（2026-06-17）
-
-**已完成并集成验证**：把 agy 的内部斜线指令暴露为 MCP 工具，外部（Claude）可直接
-操控。共 **24 个工具**，按接入机制分 6 层。完整设计、每条指令的文件路径与机制见
-**[`agy_knowledge/command_access_tiers.md`](agy_knowledge/command_access_tiers.md)**。
-
-| 层 | 机制 | 状态 | 代码 |
-|----|------|------|------|
-| A | CLI flags | ✅ | `agy_client.py` |
-| B | SQLite fork/rewind/export | ✅ | `conversations.py` |
-| C | 配置文件 settings/keybindings/mcp/statusline/hooks/skills | ✅ | `tier_c_commands.py` |
-| D | shell diff/open/logout + plugin | ✅ | `tier_d_commands.py` |
-| E | gRPC（usage + tasks + agents） | ✅ 3/3 | `agy_models.py` / `tier_e_commands.py` |
-| F | ConPTY 伪终端 | ✅ 7/7 | `tier_f_commands.py` |
-
-验证方式：重启 MCP server 后新工具正确加载，真实读写 `mcp.json` 成功；Tier E 的
-`list_tasks` / `agent_session_state` 对一个正在跑 `ping -t 127.0.0.1` 的活跃 agy
-会话实测返回正确数据。
-
-### ✅ Tier E 已完成（2026-06-17）
-
-`/tasks` 和 `/agents` 已实现为 `list_tasks` / `agent_session_state`，机制是**寄生
-attach 到用户正在运行的交互式 agy 进程**的本地 gRPC 语言服务器。完整原理（每进程
-独立架构、PID→端口发现、实时取证、`StreamAgentStateUpdates` 首条快照里抽扁平 JSON）
-见 `command_access_tiers.md` 的 Tier E 段。关键点：这些是进程内存里的运行时状态，
-**只有用户开着 agy 会话时才有数据**，没会话时返回 `{"status": "no running agy
-session found"}`。
-
-### ✅ Tier F 已完成（2026-06-17）
-
-**Tier F — ConPTY 伪终端注入**（7 条指令）— 实现在 `tier_f_commands.py`
-
-涉及：`/goal` `/schedule` `/grill-me` `/planning` `/fast` `/teamwork-preview` `/btw`
-
-**技术路线**：
-1. Windows ConPTY（同 `agy_models.py` 的 `list_models`），启动 agy 交互模式。
-2. 等待 TUI 初始化（3.5 s）。
-3. 注入 `<slash_cmd>\x1b\r`（**ESC 关掉 autocomplete**，Enter 执行）。
-4. 读取 N 秒 stdout，去除 ANSI 转义，taskkill 进程树，返回截取文本。
-5. `/btw` 例外：直接用 `agy --print` 模拟，无需 PTY。
-
-**核心陷阱（已解决）**：
-- 直接管道注入 → agy 检测到非 TTY 进入 print 模式，把斜线命令当 prompt。
-- autocomplete 吞掉第一个裸 Enter（`/usage` 实验）→ 改用 ESC+Enter 序列。
-
----
-
-## 0b. Original state (2026-06-16)
-
-The TUI (`tui.py`, launched by `run.bat`) is **functional**:
-
-- **Layout** (owner-confirmed via screenshots): a full-height left rail **B**
-  (`Models` / `Quota` nav) beside a right column stacking the status panel **C**
-  (`log in` / `log out` + profile) over the main panel **D** (content).
-- **Models view**: lists the **live** model labels from `agy models`, with a green `●`
-  on the currently-selected one; click a row to switch (writes `settings.json`).
-- **Quota & Usage view**: **Fully completed** with **real gRPC data** (Method E below).
-  - **Account Group Limits**: real Weekly / Five-Hour progress bars for Gemini group AND
-    Claude & GPT group, fetched live from `agy`'s local language-server gRPC endpoint
-    `RetrieveUserQuotaSummary`. Color-coded: green ≥ 40%, yellow 10–40%, red < 10%.
-    Countdown timers compute seconds-until-reset from the Unix timestamps in the response.
-  - **Session Usage**: active model, elapsed time, workspace dir, estimated tokens from
-    the newest conversation SQLite DB.
-  - **Individual Model Quotas**: daily request counts from the REST `retrieveUserQuota`
-    endpoint (Gemini model IDs only, all separate from the group token limits above).
-- Login/logout + profile email work; a 3 s background poll keeps the profile line
-  and the selection `●` in sync with external `/model` changes.
-
-Backups/scratch: `tui.sidebar-layout.bak.py` is an obsolete intermediate layout
-(safe to delete). `tui_crash.log` is written by the crash logger (gitignored).
+**委托分工**（见 [`agy_knowledge/delegation.md`](agy_knowledge/delegation.md)）：
+- **gemi-mcp**：上网搜索、图片生成、多模态分析
+- **agy-mcp**：代码写入、文件修改、git 操作
+- **Claude**：设计决策、复杂推理、最终验证
 
 ---
 
 ## 1. Where `agy` lives
 
 ```
-AGY_BIN = %LOCALAPPDATA%\agy\bin\agy.exe        (override with the AGY_BIN env var)
+AGY_BIN = %LOCALAPPDATA%\agy\bin\agy.exe        (override: AGY_BIN env var)
 app data = %USERPROFILE%\.gemini\antigravity-cli\
 ```
 
@@ -115,144 +44,49 @@ Useful flags: `--print/-p <prompt>`, `--model <label>`, `--conversation <id>`,
 `--continue/-c`, `--dangerously-skip-permissions`, `--add-dir <dir>`,
 `--log-file <path>`.
 
-There are **four** ways to get data out of `agy` (plus a prompt round-trip).
-Pick per need.
-
 ---
 
-## 2. Method A — shared config files (the "real record")
+## 2. OAuth credential (Windows Credential Manager)
 
-`agy`, the MCP server, and the TUI all share these files. Reading/writing them is
-the canonical, dependency-free way to observe and change CLI state.
-
-### `settings.json` — `~/.gemini/antigravity-cli/settings.json`
-```json
-{ "model": "Gemini 3.5 Flash (Medium)", "trustedWorkspaces": [...],
-  "permissions": {...}, "enableTelemetry": false, "allowNonWorkspaceAccess": true }
-```
-- `"model"` = the **currently selected** model **display label**. Read it for the
-  active selection; write it to switch models. The change is picked up by the CLI
-  and MCP server on their next call (bidirectional sync).
-- See `get_selected_model()` / `set_selected_model()` in `tui.py`.
-
-### `trustedFolders.json` — `~/.gemini/trustedFolders.json`
-Map of folder → `"TRUST_FOLDER"`. Used to pick a trusted `cwd` so headless
-`--print` runs don't block on a trust prompt (see `agy_client.py`).
-
-### OAuth credential — Windows Credential Manager
 - Target `gemini:antigravity`, type `CRED_TYPE_GENERIC` (read via `win32cred`).
-- Blob is JSON:
-  `{"token":{"access_token":"ya29...","refresh_token":"1//...","expiry":"..."},"auth_method":"consumer"}`
-- `check_email_now()` in `tui.py` shows the read + a userinfo call.
-- **Token refresh:** if a token call returns 401, run `agy models` headless
-  (`creationflags=0x08000000` = CREATE_NO_WINDOW) — it refreshes the keyring token
-  via the refresh_token as a side effect — then re-read the credential and retry.
+- Blob JSON:
+  ```json
+  {"token":{"access_token":"ya29...","refresh_token":"1//...","expiry":"..."},"auth_method":"consumer"}
+  ```
+- **Token refresh:** 401 → run `agy models` headless (`CREATE_NO_WINDOW`) as a side effect → re-read credential and retry.
+- `check_email_now()` in `tui.py`: reads credential + userinfo call to show profile email.
 
 ---
 
-## 3. Method B — `agy models` via ConPTY (the live model list)
+## 3. REST APIs (cloudcode-pa)
 
-**The only way to get the full display labels** (`Gemini 3.5 Flash (Medium)`,
-`Claude Sonnet 4.6 (Thinking)`, `GPT-OSS 120B (Medium)`, …). See `agy_models.py`.
-
-### The catch
-`agy models` prints the list **only when stdout is a real console** (it checks
-`isatty`). Under a pipe / redirect / headless it authenticates and exits but
-prints **nothing**. So you must attach it to a **pseudo-console**.
-
-### The mechanism (`agy_models.py::list_models()`)
-- Use the Windows **ConPTY** API via `ctypes` — `CreatePseudoConsole` +
-  `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. **No third-party
-  dependency** (don't add `pywinpty`; the MSYS `winpty` binary needs a tty stdin
-  and won't work here).
-- Output is VT-encoded: a `⠋ Fetching available models...` spinner (braille frames
-  redrawn with `\x1b[H`) followed by the labels, one per `\r\n`. Parse =
-  strip ANSI/OSC escapes, strip the spinner regex, keep non-empty lines that
-  aren't `Fetching available models`.
-- `agy` spawns a **background language server + auto-updater** that keep the pty's
-  write end open, so the reader never sees EOF. Pattern: read on a thread,
-  `WaitForSingleObject` on the main `agy` process (it exits after printing, ~2-3s),
-  then `taskkill /F /T /PID <pid>` the whole tree, then join the reader.
-- Cost ~5-6s (CLI startup + a live backend fetch). **Call it off the UI thread.**
-- "Live, never cached to disk" is the owner's requirement — fetch each session;
-  the in-memory `MODELS_CACHE` is fine, but don't persist a model list.
-
----
-
-## 4. Method C — cloudcode-pa REST APIs (quota, project)
-
-Same OAuth token as §2. Headers: `Authorization: Bearer <access_token>`,
-`Content-Type: application/json`. (The CLI also sends `User-Agent: Go-http-client/1.1`
-and `x-goog-api-client: gl-go/...`; not required for the calls that work.)
-All are `POST`.
+Same OAuth token. Headers: `Authorization: Bearer <token>`, `Content-Type: application/json`. All `POST`.
 
 | Endpoint | Host | Body | Result |
 |---|---|---|---|
-| `:retrieveUserQuota` | `cloudcode-pa.googleapis.com` | `{"project":"app"}` | **200** — `buckets[]` of `{modelId, remainingFraction, resetTime, tokenType}`. modelIds are internal Gemini ids only (`gemini-2.5-flash`, `gemini-3-pro-preview`, …) — **not** display labels, no Claude/GPT-OSS. |
-| `:loadCodeAssist` | `daily-cloudcode-pa.googleapis.com` | `{}` | **200** — returns `cloudaicompanionProject` (dynamic per account, e.g. `daring-scheme-jf16k`), `currentTier`, `allowedTiers`. Don't hardcode the project — discover it here. |
-| `:fetchAvailableModels` | either host | `{"project": ...}` | **403 PERMISSION_DENIED** for the user OAuth token, every host/project. Gated to the CLI's internal language-server auth. **Use Method B instead** for the model list. |
-
-Notes:
-- This build uses the `daily-cloudcode-pa` host for its own calls; quota works on
-  the prod `cloudcode-pa` host.
-- `:retrieveUserQuota` returns **daily request counts** for Gemini model IDs only.
-  It does **not** return the Weekly/Five-Hour token-capacity group limits shown by
-  `agy /usage`. Those come from Method E below.
+| `:retrieveUserQuota` | `cloudcode-pa.googleapis.com` | `{"project":"app"}` | **200** — `buckets[]` of `{modelId, remainingFraction, resetTime}`. Gemini model IDs only, no Claude/GPT-OSS. |
+| `:loadCodeAssist` | `daily-cloudcode-pa.googleapis.com` | `{}` | **200** — `cloudaicompanionProject` (dynamic per account), `currentTier`. Discover here, never hardcode. |
+| `:fetchAvailableModels` | either host | `{"project": ...}` | **403 PERMISSION_DENIED** — gated to language-server internal auth. Use ConPTY `agy models` instead. |
 
 ---
 
-## 5. Method E — local gRPC language server (`RetrieveUserQuotaSummary`)
+## 4. gRPC language server — technical details
 
-This is the method used by `agy` itself for `/usage`. It is the **only** source for
-the real Weekly / Five-Hour group quota limits (Gemini group and Claude/GPT group).
-
-### How agy exposes this
-
-When `agy` starts (any mode — interactive, `--print`, or headless), it spawns an
-in-process language server that opens **two** random TCP ports on `127.0.0.1`:
-
-| Port | Protocol |
-|---|---|
-| Lower number | gRPC over **self-signed TLS** |
-| Higher number | HTTP (`/healthz` only) |
-
-The ports are logged at startup:
-```
-Language server listening on random port at 52309 for HTTPS (gRPC)
-Language server listening on random port at 52310 for HTTP
-```
-(See `~/.gemini/antigravity-cli/log/cli-YYYYMMDD_HHMMSS.log`)
+Full technique in [`AGENTS.md`](AGENTS.md). Key details not in architecture.md:
 
 ### Port discovery
 
-Snapshot `Get-NetTCPConnection` **before** and **after** starting agy, take the diff:
-
 ```python
-import subprocess, re
-_C = 0x08000000  # CREATE_NO_WINDOW
-
-def _local_ports() -> set[int]:
-    r = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command",
-         "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 "
-         "-ErrorAction SilentlyContinue | Select-Object LocalPort | ConvertTo-Json"],
-        capture_output=True, text=True, creationflags=_C)
-    return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
-
+# snapshot ports before/after spawning agy:
 ports_before = _local_ports()
-proc = subprocess.Popen([AGY_BIN], stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, creationflags=_C)
-# poll until len(new) >= 2, sleep 0.5 s between polls
-grpc_port = min(_local_ports() - ports_before)   # lower = gRPC/TLS
+proc = subprocess.Popen([AGY_BIN], ...)
+# poll until len(new_ports) >= 2, sleep 0.5 s
+grpc_port = min(_local_ports() - ports_before)  # lower = gRPC/TLS
 ```
 
-### TLS certificate
-
-The language server uses a per-session **self-signed cert**. Python's `grpcio`
-requires the cert as a PEM-encoded root CA:
+### TLS cert extraction
 
 ```python
-import ssl, socket
 ctx = ssl.create_default_context()
 ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 with socket.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
@@ -260,133 +94,65 @@ with socket.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
         cert_pem = ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
 ```
 
-### gRPC call
-
-```python
-import grpc
-creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
-opts = [("grpc.ssl_target_name_override","localhost"),
-        ("grpc.default_authority","localhost")]
-channel = grpc.secure_channel(f"127.0.0.1:{grpc_port}", creds, options=opts)
-stub = channel.unary_unary(
-    "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
-    request_serializer=bytes, response_deserializer=bytes)
-resp = stub(b"", timeout=10)   # empty request; resp is raw protobuf bytes
-```
-
-Dependency: `pip install grpcio` (listed in `requirements.txt`). Wait **~4 s after
-port discovery** before calling — OAuth auth completes asynchronously inside agy.
-
-### Protobuf wire format (manual decode — no .proto file needed)
-
-The 1120-byte response decodes to this logical structure:
+### Protobuf structure (`RetrieveUserQuotaSummary` response)
 
 ```
 QuotaSummaryResponse {
-  field[1] (bytes) → QuotaSummaryPayload {
-    field[2] (bytes, repeated) → QuotaGroup {
-      field[1] (bytes, repeated) → QuotaBucket {
-        field[1] (bytes)   → bucket id  ("gemini-weekly", "gemini-5h", "3p-weekly", "3p-5h")
-        field[2] (bytes)   → display name ("Weekly Limit", "Five Hour Limit")
-        field[3] (bytes)   → period id  ("weekly", "5h")
-        field[4] (float32) → remaining fraction  0.0 – 1.0  (multiply by 100 for %)
-        field[6] (bytes)   → Timestamp sub-message { field[1] (varint) = Unix seconds }
-        field[7] (bytes)   → human-readable message (e.g. "Refreshes in 2 days, 7 hours")
-        field[8] (varint)  → is_hit bool (1 = limit reached)
+  field[1] → QuotaSummaryPayload {
+    field[2] repeated → QuotaGroup {
+      field[1] repeated → QuotaBucket {
+        field[1] → bucket id  ("gemini-weekly", "gemini-5h", "3p-weekly", "3p-5h")
+        field[2] → display name ("Weekly Limit", "Five Hour Limit")
+        field[4] → remaining fraction  float32  (0.0–1.0)
+        field[6] → Timestamp { field[1] = Unix seconds }
+        field[7] → human message ("Refreshes in 2 days, 7 hours")
+        field[8] → is_hit bool
       }
-      field[2] (bytes) → group display name ("Gemini Models", "Claude and GPT models")
-      field[3] (bytes) → group description
+      field[2] → group name ("Gemini Models", "Claude and GPT models")
     }
-    field[3] (bytes) → top-level description
   }
 }
 ```
 
-Full manual decoder in `agy_models.py::_parse_quota_proto()`. Key: wire type 5 = 32-bit
-float, wire type 0 = varint, wire type 2 = length-delimited (string / sub-message).
+Full decoder: `agy_models.py::_parse_quota_proto()`. Wire type 5 = float32, 0 = varint, 2 = length-delimited.
 
-### Teardown
+### Other available gRPC methods (verified)
 
-Always kill the spawned agy process tree after the call:
+Empty-request methods: `GetUserStatus` (4.7 KB account info), `GetWorkspaceInfos`, `GetAllCascadeTrajectories`.
+Field-1-string methods: `GetCascadeTrajectory`, `GetCascadeTrajectorySteps`, `GetConversationMetadata`, `GetAgentTeamMetadata` (field1 = `file://` project URI).
+`GetSlashCommands`: needs nested model sub-message + real trajectory id — not wrapped yet.
+`RequestAgentStatePageUpdate`: push model, must have active `StreamAgentStateUpdates` subscriber first.
 
-```python
-subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_C)
-```
+### Wait after port discovery
 
-### What you get (example values, 2026-06-16)
+OAuth auth completes asynchronously inside agy. Wait **~4 s** after port discovery before making gRPC calls.
 
-| Group | Limit | Remaining | Reset |
-|---|---|---|---|
-| Gemini Models | Weekly | 40.1% | ~56 h |
-| Gemini Models | Five-Hour | 100.0% | n/a |
-| Claude and GPT models | Weekly | 0.0% (hit) | ~46 h |
-| Claude and GPT models | Five-Hour | 100.0% (hit flag) | n/a |
+### Dead end: ConPTY `/usage`
 
-### Also tried and ruled out
-
-- **REST `/v1internal:retrieveUserQuotaSummary`** on `cloudcode-pa` → **403
-  PERMISSION_DENIED** with user OAuth token; this endpoint requires the language
-  server's internal credentials.
-- **ConPTY `/usage`** injection → first Enter selects autocomplete (fills input),
-  second Enter triggers "No matches" — the command never executes. Dead end.
+ConPTY injection of `/usage` doesn't work — the first Enter selects the autocomplete item, the second triggers "No matches." The gRPC path is the only working `/usage` source.
 
 ---
 
-## 6. Method D — headless prompt round-trip (`agy --print`)
+## 5. Diagnostics
 
-For delegating a prompt and reading the answer (this is what the MCP server does).
-See `agy_client.py::ask_agy()`.
-
-- `agy --model <label> --dangerously-skip-permissions --print <prompt>` writes the
-  answer **only to its SQLite trajectory store**, never stdout. Read it back from
-  the newest DB in `~/.gemini/antigravity-cli/conversations/*.db` (`steps` table:
-  `step_type 14` = user turn, `step_type 15` = assistant text in protobuf field 1;
-  `agy_client.py` walks the protobuf wire format without a `.proto`).
-- Run in a trusted `cwd` (from `trustedFolders.json`) with
-  `env GEMINI_CLI_TRUST_WORKSPACE=true`, `stdin=DEVNULL`, `CREATE_NO_WINDOW`.
-- `--conversation <id>` resumes; the reply appends to the same DB (multi-turn).
-- **`/slash` commands do NOT work via `--print`** — the agent treats `/quota`,
-  `/model`, etc. as a normal prompt and hangs analyzing the workspace. Use the
-  config files / REST APIs / ConPTY methods above instead.
+- **`agy --log-file <path> models`** — verbose log: OAuth flow, every backend URL hit, model propagation. How `fetchAvailableModels`/`loadCodeAssist` endpoints were discovered.
+- **`_startup.log`** — written by `server.py` before MCP negotiation; confirms the process started.
+- **`tui_crash.log`** — uncaught exceptions from any TUI thread (alt-screen eats tracebacks).
+- Prior research scratch: `~/.gemini/antigravity/brain/<id>/scratch/test_*.py`
 
 ---
 
-## 7. Diagnostics & discovery
+## 6. pytermgui gotchas (all fixed in `tui.py`)
 
-- **`agy --log-file <path> models`** writes a verbose log: the OAuth flow, every
-  backend URL hit, and the selected-model propagation. This is how the
-  `fetchAvailableModels` / `loadCodeAssist` endpoints were discovered. Invaluable
-  when reverse-engineering a new capability.
-- Prior research scratch (REST probes): `~/.gemini/antigravity/brain/<id>/scratch/test_*.py`.
+1. **Splitter `KeyError: 'scroll_down'`** — `Container.handle_key` reads `self.keys["scroll_down"]` unconditionally. Fix: `sp.keys = {**sp.keys, "scroll_down": set(), "scroll_up": set()}` in `_split()`.
 
----
+2. **Splitter `+1` position fudge** — bumps `pos.y` of direct children whose `type(...).__name__ == "Container"`. `_Column`/`_Frame` are subclasses, so name check misses them → hover/click hits wrong row.
 
-## 8. pytermgui gotchas (all hit & fixed in `tui.py`)
+3. **Splitter mispads unequal-height columns** — fills missing rows with mutated `target_width`. Fix: pad both children to the same `body_h` line count in `update_content_ui()`.
 
-These are pytermgui quirks that crash or misrender; the fixes are in the code.
+4. **Compositor draw thread race** — `set_widgets` (`self._widgets = []` then append) races the draw thread's `get_lines` → `RuntimeError: list changed size during iteration`. Fix: `_Column` guards with a re-entrant lock.
 
-1. **Splitter `KeyError: 'scroll_down'` crash.** `Splitter.keys` omits the scroll
-   bindings, but inherited `Container.handle_key` reads `self.keys["scroll_down"]`
-   *unconditionally* on every keypress → crash when any key/mouse-wheel routes to a
-   splitter. Fix in `_split()`: `sp.keys = {**sp.keys, "scroll_down": set(), "scroll_up": set()}`.
-2. **Splitter `+1` position fudge.** It bumps the stored `pos.y` of any direct
-   child whose `type(...).__name__ == "Container"` (a hack for bordered boxes) →
-   hover/click hit the neighbouring row. Fix: columns/frames are Container
-   **subclasses** (`_Column`, `_Frame`) so the name check misses.
-3. **Splitter mispads unequal-height columns** (fills missing rows with a mutated
-   `target_width`). Fix: pad both Splitter children to the **same** line count —
-   `update_content_ui()` computes `body_h` and pads B and D to it.
-4. **Compositor draws on its own thread.** `set_widgets` (`self._widgets = []` then
-   append) races the draw thread's `get_lines` → `RuntimeError: list changed size
-   during iteration`. Fix: `_Column` guards `set_widgets`/`get_lines` with a
-   re-entrant lock.
-5. **Crash logging:** uncaught exceptions on any thread are appended to
-   `tui_crash.log` via `_install_crash_logging()` — the alt-screen otherwise eats
-   tracebacks. Read that file first when the TUI dies.
-6. **Console encoding:** printing box-drawing chars under Windows cp1252 crashes —
-   set `PYTHONIOENCODING=utf-8`. Smoke test without a TTY:
-   `PYTHONIOENCODING=utf-8 python -c "import tui; tui.build_window()"`.
+5. **Console encoding** — box-drawing chars crash under Windows cp1252. Set `PYTHONIOENCODING=utf-8`. Smoke test: `PYTHONIOENCODING=utf-8 python -c "import tui; tui.build_window()"`.
 
 ### Styling (don't redo)
 - Uniform grey `240` for every frame/divider (`BORDER`).
@@ -395,13 +161,8 @@ These are pytermgui quirks that crash or misrender; the fixes are in the code.
 
 ---
 
-## 9. Pending tasks
+## 7. Pending / Next steps
 
-1. **Interactive Chat session / logs**: Hook up chat session launching or log
-   printing inside the TUI directly.
-2. **Interactive OAuth triggers**: Wire the OAuth triggers in TUI directly if needed.
-3. Decide whether to keep the crash-logging hook for release.
-4. `requirements.txt` now lists `mcp[cli]`, `pytermgui`, and `grpcio`.
-   `tui.py` also uses `pywin32` (`win32cred`) — add it explicitly if not implied
-   by another dep.
-
+1. **Chat session / logs in TUI** — hook up session launch or log viewer inside the TUI.
+2. **Interactive OAuth trigger** — wire re-auth flow in TUI directly.
+3. `requirements.txt` lists `mcp[cli]`, `pytermgui`, `grpcio`, `pyyaml`. `tui.py` also uses `win32cred` — add `pywin32` explicitly if not implied by a dep.

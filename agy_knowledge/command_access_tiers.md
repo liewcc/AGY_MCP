@@ -191,7 +191,7 @@ trajectory id + 在跑的 tool action。
 
 ---
 
-## Tier F — ConPTY 伪终端注入（未实现）
+## Tier F — ConPTY 伪终端注入（已实现）
 
 这些是纯会话内指令，无文件/DB/gRPC 落点，只能通过伪终端模拟交互输入：
 

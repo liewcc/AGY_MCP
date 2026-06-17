@@ -8,23 +8,27 @@
 
 | 文档 | 内容 |
 |------|------|
-| [slash_commands.md](slash_commands.md) | agy 互动模式全部 **31 条斜线指令**清单（指令名、别名、说明） |
-| [command_access_tiers.md](command_access_tiers.md) | **核心文档**：如何让外部程序操控这些指令，按接入难度分 6 层（A–F），含每条指令的实现状态、文件路径、机制 |
+| [architecture.md](architecture.md) | **入口文档**：MCP server 整体架构、模块分工、与 agy 的 6 种通信机制（含数据流图） |
+| [command_access_tiers.md](command_access_tiers.md) | 每条斜线指令的接入机制详表，按层级 A–F 列出实现状态与代码位置 |
+| [slash_commands.md](slash_commands.md) | agy 互动模式全部斜线指令清单（指令名、别名、说明） |
 | [delegation.md](delegation.md) | gemi-mcp / agy-mcp / Claude 三方委托分工策略（节省 token） |
 
 ## 快速理解路径
 
-1. 想知道 agy **有哪些指令** → `slash_commands.md`
-2. 想知道**外部如何调用**这些指令、**已实现哪些** → `command_access_tiers.md`
-3. 想知道**何时该委托** agy 而非 Claude 自己做 → `delegation.md`
+1. 想了解**整体架构 / server 如何与 agy 通信** → `architecture.md`
+2. 想知道 agy **有哪些指令** → `slash_commands.md`
+3. 想知道**每条指令怎么接入、已实现哪些** → `command_access_tiers.md`
+4. 想知道**何时委托 agy 而非 Claude 自己做** → `delegation.md`
 
 ## 实现代码位置（在项目根目录，非本文件夹）
 
 | 代码文件 | 对应层级 |
 |----------|----------|
-| `agy_client.py` | Tier A（CLI flags）+ SQLite 读取基础设施 |
+| `agy_client.py` | Tier A（CLI flags + headless --print + SQLite 读取） |
 | `conversations.py` | Tier B（fork/rewind/export） |
 | `tier_c_commands.py` | Tier C（配置文件读写） |
 | `tier_d_commands.py` | Tier D（diff/open/logout） |
-| `agy_models.py` | Tier E（gRPC quota） |
-| `server.py` | 统一 MCP 工具注册入口 |
+| `tier_e_commands.py` | Tier E（gRPC attach — tasks/agents） |
+| `tier_f_commands.py` | Tier F（ConPTY 伪终端注入） |
+| `agy_models.py` | Tier E（gRPC quota）+ ConPTY 模型列表 |
+| `server.py` | 统一 MCP 工具注册入口（39 个工具） |
