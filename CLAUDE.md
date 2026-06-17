@@ -8,7 +8,7 @@ Project guidance for AI assistants working in this repo. Keep this file current.
 MCP clients delegate a prompt to `agy` and read the answer back — no API key, it
 rides the CLI's local OAuth login. Full details in [README.md](README.md).
 
-**Tools exposed:** `ask_antigravity`, `list_conversations`, `read_conversation`.
+**Tools exposed:** 39 tools across Tiers A–F. See [agy_knowledge/architecture.md](agy_knowledge/architecture.md) for the full list and communication design.
 
 ## Layout
 
@@ -43,7 +43,7 @@ The pytermgui TUI control panel is **functional**:
 - Quota view: **Completed with real gRPC data**.
   - *Group Limits*: real Weekly / Five-Hour progress bars for Gemini and Claude & GPT
     groups, sourced from `agy`'s local gRPC language server
-    (`RetrieveUserQuotaSummary`). See AGENTS.md for the full technique and code.
+    (`RetrieveUserQuotaSummary`). See HANDOFF.md §4 for the full technique and code.
   - *Session Usage*: active model, elapsed time, workspace, estimated tokens from SQLite.
   - *Individual Model Quotas*: daily request counts from REST `retrieveUserQuota`.
 - **Next steps**: Incrementally add chat session capabilities, hook up real OAuth
@@ -76,4 +76,3 @@ run.bat       REM launch the control-panel TUI
 - The owner iterates visually via screenshots and wants a **minimalist** UI
   ("越精简越好" — the simpler the better). Prefer flat, low-chrome widgets.
 - Build features **incrementally** and confirm look/behaviour before expanding.
-- See [AGENTS.md](AGENTS.md) for the shared agent working agreement.
