@@ -29,6 +29,9 @@ from conversations import fork_conversation as _fork_conversation
 from conversations import format_transcript as _format_transcript
 from conversations import list_conversations as _list_conversations
 from conversations import rewind_conversation as _rewind_conversation
+from tier_d_commands import logout as _logout
+from tier_d_commands import open_path as _open_path
+from tier_d_commands import show_diff as _show_diff
 
 mcp = FastMCP("agy-mcp")
 
@@ -216,6 +219,55 @@ async def enable_plugin(name: str) -> str:
 async def disable_plugin(name: str) -> str:
     """Disable a plugin without uninstalling it."""
     return await asyncio.to_thread(run_agy_subcommand, "plugin", "disable", name)
+
+
+# ---- Tier D: shell subcommands and file operations ----
+
+
+@mcp.tool()
+async def show_diff(path: Optional[str] = None, working_dir: Optional[str] = None) -> str:
+    """Show git diff for workspace changes (/diff).
+
+    Displays modified files and their line-by-line diffs.  If `path` is omitted,
+    shows all changes; if provided, shows changes for that file or directory tree.
+
+    Args:
+        path: Optional file or directory path (relative or absolute).
+        working_dir: Directory to run git from (default: current directory).
+
+    Returns:
+        git diff output as text, or error message if git fails.
+    """
+    return await asyncio.to_thread(_show_diff, path, working_dir)
+
+
+@mcp.tool()
+async def open_path(path: str) -> dict:
+    """Open a file or directory in the system default application (/open).
+
+    Launches the default editor for text files, image viewer for images, etc.
+    On Windows uses os.startfile; on macOS/Linux uses open/xdg-open.
+
+    Args:
+        path: Absolute or relative path to file or directory.
+
+    Returns:
+        {"opened": <absolute_path>, "status": "success"} or error dict.
+    """
+    return await asyncio.to_thread(_open_path, path)
+
+
+@mcp.tool()
+async def logout() -> dict:
+    """Delete OAuth credentials and logout from Google (/logout).
+
+    Removes the local token files so the next `agy` run will require
+    re-authentication. Safe to call multiple times.
+
+    Returns:
+        {"deleted": [<files>], "status": "success"} or status dict.
+    """
+    return await asyncio.to_thread(_logout)
 
 
 if __name__ == "__main__":
