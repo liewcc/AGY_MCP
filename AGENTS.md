@@ -10,6 +10,9 @@ in this repository.
    methods (including the gRPC approach), and pytermgui gotchas. Do this before
    touching `tui.py`.
 3. [CLAUDE.md](CLAUDE.md) has the file map and conventions.
+4. **[agy_knowledge/](agy_knowledge/README.md)** — dedicated knowledge base for the
+   agy CLI: the 31 slash commands, the 6-tier external-access model, and the
+   delegation strategy. Go here to understand the command structure in depth.
 
 ## What's in flight
 
@@ -24,7 +27,7 @@ The **Quota & Usage** panel (`tui.py` Quota view) is **complete with real data**
   `retrieveUserQuota` endpoint.
 - **Reload button** — `↻ reload` in the Quota view forces a live refresh.
 
-**Delegation strategy** (`DELEGATION.md`) — three-party split for token efficiency:
+**Delegation strategy** ([agy_knowledge/delegation.md](agy_knowledge/delegation.md)) — three-party split for token efficiency:
 - **gemi-mcp**: web search (`apply_settings(tool="Google Search")` first), image gen, multimodal file analysis.
 - **agy-mcp** (`ask_antigravity`): code writes, file edits, git ops. Pass `working_dir` to set the target project as agy's workspace (full project scan, correct git repo, relative paths all work). Parameter is per-call, can point to any project each time.
 - **Claude**: design decisions, complex reasoning, final verification.

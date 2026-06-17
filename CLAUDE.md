@@ -14,13 +14,24 @@ rides the CLI's local OAuth login. Full details in [README.md](README.md).
 
 | File | Role |
 |------|------|
-| `server.py` | FastMCP server — entry point for MCP clients. |
+| `server.py` | FastMCP server — entry point for MCP clients. Registers all tools. |
 | `agy_client.py` | Spawns `agy.exe`, reads answers from the CLI's SQLite store. |
-| `agy_models.py` | Live model list — runs `agy models` under a Windows ConPTY. |
-| `conversations.py` | List / read past conversations. |
+| `agy_models.py` | Live model list + gRPC quota — runs under a Windows ConPTY. |
+| `conversations.py` | List / read past conversations + Tier B (fork/rewind/export). |
+| `tier_c_commands.py` | Tier C — config file read/write (settings/keybindings/mcp/statusline/hooks/skills). |
+| `tier_d_commands.py` | Tier D — shell ops (diff/open/logout). |
 | `tui.py` | **Terminal control panel** (pytermgui). Launched by `run.bat`. |
-| `requirements.txt` | `mcp[cli]`, `pytermgui`, `grpcio`. |
+| `requirements.txt` | `mcp[cli]`, `pytermgui`, `grpcio`, `pyyaml`. |
 | `setup.bat` / `run.bat` | Install deps / launch the TUI. |
+| `agy_knowledge/` | **Knowledge base** — slash commands, access tiers, delegation. Start at its README. |
+
+## agy command structure
+
+The MCP server exposes **22 tools** that let external clients drive agy's internal
+slash commands. They're organized into access tiers (A–F) by mechanism. The full
+inventory, implementation status, and how-it-works lives in
+**[agy_knowledge/command_access_tiers.md](agy_knowledge/command_access_tiers.md)** —
+read it before adding or modifying any slash-command-equivalent tool.
 
 ## Active work
 

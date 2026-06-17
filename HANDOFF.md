@@ -10,7 +10,7 @@ add features against `agy` using only this document.
 
 ### 本次会话新增
 
-**新建 `DELEGATION.md`**（项目根目录）：三方分工指南，供 Claude 自用。
+**委托分工指南** [`agy_knowledge/delegation.md`](agy_knowledge/delegation.md)：三方分工指南，供 Claude 自用。
 - **gemi-mcp**：上网搜索（需先 `apply_settings(tool="Google Search")`）、图片生成、文件多模态分析。控制 Gemini 网页 UI，依赖 engine_service.py port 18800。
 - **agy-mcp**：代码写入、文件修改、git 操作，用 `ask_antigravity`。
 - **Claude**：设计决策、复杂推理、最终验证。
