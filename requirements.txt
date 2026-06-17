@@ -1,8 +1,8 @@
 # MCP server framework (FastMCP + CLI helpers)
 mcp[cli]
 
-# Terminal UI control panel (only dep is wcwidth — tiny footprint)
-pytermgui
+# Terminal UI framework (Textual - modern TUI with better layout control)
+textual
 
 # gRPC client for RetrieveUserQuotaSummary via agy's local language server
 grpcio
