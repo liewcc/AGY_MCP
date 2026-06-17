@@ -22,38 +22,40 @@ with open(_log, "a", encoding="utf-8") as _f:
     _f.write(f"started pid={os.getpid()} cwd={os.getcwd()} "
              f"python={sys.version.split()[0]}\n")
 
-from agy_client import ask_agy, run_agy_subcommand
-from agy_models import list_models as _list_models
-from conversations import export_conversation as _export_conversation
-from conversations import fork_conversation as _fork_conversation
-from conversations import format_transcript as _format_transcript
-from conversations import list_conversations as _list_conversations
-from conversations import rewind_conversation as _rewind_conversation
-from tier_c_commands import get_config_info as _get_config_info
-from tier_c_commands import list_hooks as _list_hooks
-from tier_c_commands import list_skills as _list_skills
-from tier_c_commands import read_hook_script as _read_hook_script
-from tier_c_commands import read_keybindings as _read_keybindings
-from tier_c_commands import read_mcp_config as _read_mcp_config
-from tier_c_commands import read_settings as _read_settings
-from tier_c_commands import read_statusline_config as _read_statusline_config
-from tier_c_commands import write_hook_script as _write_hook_script
-from tier_c_commands import write_keybindings as _write_keybindings
-from tier_c_commands import write_mcp_config as _write_mcp_config
-from tier_c_commands import write_settings as _write_settings
-from tier_c_commands import write_statusline_config as _write_statusline_config
-from tier_d_commands import logout as _logout
-from tier_d_commands import open_path as _open_path
-from tier_d_commands import show_diff as _show_diff
-from tier_e_commands import agent_session_state as _agent_session_state
-from tier_e_commands import list_tasks as _list_tasks
-from tier_f_commands import ask_btw as _ask_btw
-from tier_f_commands import run_goal as _run_goal
-from tier_f_commands import start_grill_me as _start_grill_me
-from tier_f_commands import start_planning as _start_planning
-from tier_f_commands import start_schedule as _start_schedule
-from tier_f_commands import start_teamwork_preview as _start_teamwork_preview
-from tier_f_commands import toggle_fast_mode as _toggle_fast_mode
+from agy_core import (
+    ask_agy, run_agy_subcommand,
+    list_models as _list_models,
+    export_conversation as _export_conversation,
+    fork_conversation as _fork_conversation,
+    format_transcript as _format_transcript,
+    list_conversations as _list_conversations,
+    rewind_conversation as _rewind_conversation,
+    get_config_info as _get_config_info,
+    list_hooks as _list_hooks,
+    list_skills as _list_skills,
+    read_hook_script as _read_hook_script,
+    read_keybindings as _read_keybindings,
+    read_mcp_config as _read_mcp_config,
+    read_settings as _read_settings,
+    read_statusline_config as _read_statusline_config,
+    write_hook_script as _write_hook_script,
+    write_keybindings as _write_keybindings,
+    write_mcp_config as _write_mcp_config,
+    write_settings as _write_settings,
+    write_statusline_config as _write_statusline_config,
+    logout as _logout,
+    open_path as _open_path,
+    show_diff as _show_diff,
+    agent_session_state as _agent_session_state,
+    list_tasks as _list_tasks,
+    ask_btw as _ask_btw,
+    run_goal as _run_goal,
+    start_grill_me as _start_grill_me,
+    start_planning as _start_planning,
+    start_schedule as _start_schedule,
+    start_teamwork_preview as _start_teamwork_preview,
+    toggle_fast_mode as _toggle_fast_mode,
+)
 
 mcp = FastMCP("agy-mcp")
 

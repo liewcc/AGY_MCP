@@ -27,7 +27,7 @@ import urllib.request
 import pytermgui as ptg
 import win32cred
 
-from agy_models import list_models, get_quota_summary
+from agy_core import list_models, get_quota_summary
 
 # Where the Antigravity CLI lives. Mirrors AGY_BIN in agy_client.py so the
 # panel reports the same path the server actually uses.
