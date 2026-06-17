@@ -6,3 +6,6 @@ pytermgui
 
 # gRPC client for RetrieveUserQuotaSummary via agy's local language server
 grpcio
+
+# YAML support for statusline.yaml
+pyyaml

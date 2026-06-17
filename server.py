@@ -29,6 +29,19 @@ from conversations import fork_conversation as _fork_conversation
 from conversations import format_transcript as _format_transcript
 from conversations import list_conversations as _list_conversations
 from conversations import rewind_conversation as _rewind_conversation
+from tier_c_commands import get_config_info as _get_config_info
+from tier_c_commands import list_hooks as _list_hooks
+from tier_c_commands import list_skills as _list_skills
+from tier_c_commands import read_hook_script as _read_hook_script
+from tier_c_commands import read_keybindings as _read_keybindings
+from tier_c_commands import read_mcp_config as _read_mcp_config
+from tier_c_commands import read_settings as _read_settings
+from tier_c_commands import read_statusline_config as _read_statusline_config
+from tier_c_commands import write_hook_script as _write_hook_script
+from tier_c_commands import write_keybindings as _write_keybindings
+from tier_c_commands import write_mcp_config as _write_mcp_config
+from tier_c_commands import write_settings as _write_settings
+from tier_c_commands import write_statusline_config as _write_statusline_config
 from tier_d_commands import logout as _logout
 from tier_d_commands import open_path as _open_path
 from tier_d_commands import show_diff as _show_diff
@@ -219,6 +232,180 @@ async def enable_plugin(name: str) -> str:
 async def disable_plugin(name: str) -> str:
     """Disable a plugin without uninstalling it."""
     return await asyncio.to_thread(run_agy_subcommand, "plugin", "disable", name)
+
+
+# ---- Tier C: configuration file read/write ----
+
+
+@mcp.tool()
+async def read_settings() -> dict:
+    """Read the current settings.json (/config, /settings).
+
+    Returns:
+        {"allowNonWorkspaceAccess", "enableTelemetry", "model", "permissions",
+         "trustedWorkspaces", ...} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_read_settings)
+
+
+@mcp.tool()
+async def write_settings(settings: dict) -> dict:
+    """Write settings back to settings.json (/config, /settings).
+
+    Replaces the entire settings file. Ensure you pass a complete valid JSON object.
+
+    Args:
+        settings: The settings dictionary to write.
+
+    Returns:
+        {"saved_to": <path>, "keys": [<updated_keys>]} or error dict.
+    """
+    return await asyncio.to_thread(_write_settings, settings)
+
+
+@mcp.tool()
+async def read_keybindings() -> dict:
+    """Read the current keybindings.json (/keybindings).
+
+    Returns:
+        {"action.name": ["key1", "key2", ...], ...} or empty dict.
+    """
+    return await asyncio.to_thread(_read_keybindings)
+
+
+@mcp.tool()
+async def write_keybindings(keybindings: dict) -> dict:
+    """Write keybindings back to keybindings.json (/keybindings).
+
+    Args:
+        keybindings: The keybindings dictionary to write.
+
+    Returns:
+        {"saved_to": <path>, "actions": <count>} or error dict.
+    """
+    return await asyncio.to_thread(_write_keybindings, keybindings)
+
+
+@mcp.tool()
+async def list_skills() -> dict:
+    """List all available skill files (/skills).
+
+    Recursively finds .md files in ~/.gemini/antigravity-cli.
+
+    Returns:
+        {"skills": [<file_paths>], "count": <total>}
+    """
+    return await asyncio.to_thread(_list_skills)
+
+
+@mcp.tool()
+async def read_mcp_config() -> dict:
+    """Read the MCP servers configuration (/mcp).
+
+    Returns the mcp.json content defining external MCP servers and their commands.
+
+    Returns:
+        {"mcpServers": {"server_id": {"command": "...", "args": [...]}}}
+    """
+    return await asyncio.to_thread(_read_mcp_config)
+
+
+@mcp.tool()
+async def write_mcp_config(config: dict) -> dict:
+    """Write MCP servers configuration (/mcp).
+
+    Args:
+        config: The mcp.json structure with mcpServers definitions.
+
+    Returns:
+        {"saved_to": <path>, "servers": [<server_ids>]} or error dict.
+    """
+    return await asyncio.to_thread(_write_mcp_config, config)
+
+
+@mcp.tool()
+async def read_statusline_config() -> dict:
+    """Read the statusline configuration (/statusline).
+
+    Returns the statusline.yaml content defining TUI status bar layout and components.
+
+    Returns:
+        {"layout": {"left": [...], "right": [...]}, ...}
+    """
+    return await asyncio.to_thread(_read_statusline_config)
+
+
+@mcp.tool()
+async def write_statusline_config(config: dict) -> dict:
+    """Write statusline configuration (/statusline).
+
+    Args:
+        config: The statusline configuration dict.
+
+    Returns:
+        {"saved_to": <path>, "keys": [<top_level_keys>]} or error dict.
+    """
+    return await asyncio.to_thread(_write_statusline_config, config)
+
+
+@mcp.tool()
+async def list_hooks() -> dict:
+    """List all hook scripts (/hooks).
+
+    Returns all executable scripts in ~/.gemini/antigravity-cli/hooks/
+    (pre-prompt, post-response, etc.).
+
+    Returns:
+        {"hooks": [{"name", "executable", "size", "path"}], "count": <total>}
+    """
+    return await asyncio.to_thread(_list_hooks)
+
+
+@mcp.tool()
+async def read_hook_script(hook_name: str) -> dict:
+    """Read a specific hook script (/hooks).
+
+    Args:
+        hook_name: Name of the hook (e.g., "pre-prompt").
+
+    Returns:
+        {"content": <script>, "path": <path>, "executable": <bool>} or error dict.
+    """
+    return await asyncio.to_thread(_read_hook_script, hook_name)
+
+
+@mcp.tool()
+async def write_hook_script(hook_name: str, content: str, executable: bool = True) -> dict:
+    """Create or update a hook script (/hooks).
+
+    Hook scripts are executed at specific lifecycle events. Common names:
+    - pre-prompt: runs before sending a prompt to the model
+    - post-response: runs after receiving a response
+
+    Args:
+        hook_name: Name of the hook to create/update.
+        content: Script content (bash, python, etc.).
+        executable: Make the script executable (default True).
+
+    Returns:
+        {"saved_to": <path>, "executable": <bool>} or error dict.
+    """
+    return await asyncio.to_thread(_write_hook_script, hook_name, content, executable)
+
+
+@mcp.tool()
+async def get_config_info() -> dict:
+    """Get a summary of current configuration state.
+
+    Useful for debugging or understanding what settings are active.
+    Combines info from all configuration files: settings.json, keybindings.json,
+    mcp.json, statusline.yaml, hooks, and skills.
+
+    Returns:
+        {"settings": {...}, "keybindings": {...}, "mcp": {...}, "statusline": {...},
+         "hooks": {...}, "skills": {...}, "agy_home": <path>}
+    """
+    return await asyncio.to_thread(_get_config_info)
 
 
 # ---- Tier D: shell subcommands and file operations ----
