@@ -22,6 +22,7 @@ import ctypes
 import glob
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import socket as _sock
@@ -359,33 +360,62 @@ def run_agy_subcommand(*args: str, timeout: int = 30) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tier A — ConPTY model list + gRPC quota (used by TUI)
+# Tier A — model list (ConPTY agy models) + gRPC quota (used by TUI)
 # ---------------------------------------------------------------------------
 
+def _settings_model() -> str | None:
+    """Read the currently-selected model label from agy's settings.json."""
+    paths = [
+        Path(os.path.expanduser("~")) / ".gemini" / "antigravity-cli" / "settings.json",
+        Path(os.path.expanduser("~")) / ".gemini" / "settings.json",
+    ]
+    for p in paths:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            m = data.get("model")
+            if m:
+                return m
+        except Exception:
+            pass
+    return None
+
+
 def list_models(deadline_s: float = 12.0) -> list[str]:
-    """Return the live list of model display labels via ConPTY `agy models`.
+    """Return available model display labels by running 'agy models' via ConPTY.
 
-    `agy models` only prints when stdout is a real console, so we attach it to a
-    Windows ConPTY. Returns [] on any failure.
+    Launches 'agy models', captures its output (which lists model names after a
+    short spinner), parses the lines, then kills the process.  Falls back to just
+    the current settings.json model if ConPTY fails or times out.
     """
-    if not os.path.isfile(AGY_BIN):
-        return []
-
     res = _conpty_start(f'"{AGY_BIN}" models', width=200)
-    if res is None:
-        return []
+    if not res:
+        current = _settings_model()
+        return [current] if current else []
+
     hpc, pi, in_write, out_read = res
     chunks, t = _read_pty(out_read)
-
-    _k32.WaitForSingleObject(pi.hProcess, int(deadline_s * 1000))
+    t.join(timeout=deadline_s)  # agy models exits naturally after printing the list
     _conpty_kill(pi.dwProcessId, hpc, pi, in_write, out_read)
-    t.join(timeout=2.0)
+    t.join(timeout=3)
 
-    text = _SPINNER.sub("", _ANSI.sub("", b"".join(chunks).decode("utf-8", "replace")))
-    return [
-        s for s in (ln.strip() for ln in text.splitlines())
-        if s and "Fetching available models" not in s
-    ]
+    raw = b''.join(chunks).decode('utf-8', errors='replace')
+    clean = _ANSI.sub('', raw)
+    clean = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', clean)
+
+    models = []
+    seen: set[str] = set()
+    for line in clean.split('\n'):
+        line = line.strip()
+        if line and 'Fetching' not in line and re.match(r'^[A-Z]', line) and line not in seen:
+            seen.add(line)
+            models.append(line)
+
+    # Always include the current selection from settings.json
+    current = _settings_model()
+    if current and current not in seen:
+        models.insert(0, current)
+
+    return models if models else ([current] if current else [])
 
 
 def _parse_quota_proto(data: bytes) -> dict | None:
