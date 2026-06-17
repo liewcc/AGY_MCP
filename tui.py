@@ -336,7 +336,7 @@ class AGYMCPApp(App):
                 yield ProfileCard(id="profile-section")
 
                 # Content switcher
-                with ContentSwitcher(id="content-switcher", initial="models-view"):
+                with ContentSwitcher(id="content-switcher", initial="credential-view"):
                     yield CredentialPanel(id="credential-view", classes="panel-content")
                     yield ModelsPanel(id="models-view", classes="panel-content")
                     yield QuotaPanel(id="quota-view", classes="panel-content")
