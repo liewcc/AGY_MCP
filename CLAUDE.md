@@ -20,6 +20,7 @@ rides the CLI's local OAuth login. Full details in [README.md](README.md).
 | `conversations.py` | List / read past conversations + Tier B (fork/rewind/export). |
 | `tier_c_commands.py` | Tier C — config file read/write (settings/keybindings/mcp/statusline/hooks/skills). |
 | `tier_d_commands.py` | Tier D — shell ops (diff/open/logout). |
+| `tier_e_commands.py` | Tier E — live gRPC attach to a running agy session (tasks/agents). |
 | `tui.py` | **Terminal control panel** (pytermgui). Launched by `run.bat`. |
 | `requirements.txt` | `mcp[cli]`, `pytermgui`, `grpcio`, `pyyaml`. |
 | `setup.bat` / `run.bat` | Install deps / launch the TUI. |
@@ -27,7 +28,7 @@ rides the CLI's local OAuth login. Full details in [README.md](README.md).
 
 ## agy command structure
 
-The MCP server exposes **22 tools** that let external clients drive agy's internal
+The MCP server exposes **24 tools** that let external clients drive agy's internal
 slash commands. They're organized into access tiers (A–F) by mechanism. The full
 inventory, implementation status, and how-it-works lives in
 **[agy_knowledge/command_access_tiers.md](agy_knowledge/command_access_tiers.md)** —

@@ -30,10 +30,10 @@ add features against `agy` using only this document.
 
 ---
 
-## 0a. 斜线指令外部接入 — Tier B/C/D 完成，E/F 待续（2026-06-17）
+## 0a. 斜线指令外部接入 — Tier B/C/D/E 完成，F 待续（2026-06-17）
 
 **已完成并集成验证**：把 agy 的内部斜线指令暴露为 MCP 工具，外部（Claude）可直接
-操控。共 **22 个工具**，按接入机制分 6 层。完整设计、每条指令的文件路径与机制见
+操控。共 **24 个工具**，按接入机制分 6 层。完整设计、每条指令的文件路径与机制见
 **[`agy_knowledge/command_access_tiers.md`](agy_knowledge/command_access_tiers.md)**。
 
 | 层 | 机制 | 状态 | 代码 |
@@ -42,19 +42,23 @@ add features against `agy` using only this document.
 | B | SQLite fork/rewind/export | ✅ | `conversations.py` |
 | C | 配置文件 settings/keybindings/mcp/statusline/hooks/skills | ✅ | `tier_c_commands.py` |
 | D | shell diff/open/logout + plugin | ✅ | `tier_d_commands.py` |
-| E | gRPC | ⏳ 1/3 | `agy_models.py` |
+| E | gRPC（usage + tasks + agents） | ✅ 3/3 | `agy_models.py` / `tier_e_commands.py` |
 | F | ConPTY 伪终端 | ❌ 0/7 | 未实现 |
 
-验证方式：重启 MCP server 后 19 个新工具正确加载，真实读写 `mcp.json` 成功。
+验证方式：重启 MCP server 后新工具正确加载，真实读写 `mcp.json` 成功；Tier E 的
+`list_tasks` / `agent_session_state` 对一个正在跑 `ping -t 127.0.0.1` 的活跃 agy
+会话实测返回正确数据。
 
-### ⚠️ 留给下一个对话：Tier E 和 Tier F（都很棘手）
+### ✅ Tier E 已完成（2026-06-17）
 
-**Tier E — gRPC 探索 `/tasks` 和 `/agents`**（中等难度）
-- 已知可行：`/usage` 已通过 gRPC `RetrieveUserQuotaSummary` 实现（见本文件
-  §"gRPC quota method" 或 AGENTS.md 的完整技术细节）。
-- 待做：抓出 `/tasks`（任务状态）和 `/agents`（子代理状态）对应的 gRPC 方法名。
-- 难点：没有 `.proto` 文件，需手工解析 protobuf wire format；方法名未知，可能要
-  逆向 agy 二进制里的字符串或抓本地 gRPC 流量。
+`/tasks` 和 `/agents` 已实现为 `list_tasks` / `agent_session_state`，机制是**寄生
+attach 到用户正在运行的交互式 agy 进程**的本地 gRPC 语言服务器。完整原理（每进程
+独立架构、PID→端口发现、实时取证、`StreamAgentStateUpdates` 首条快照里抽扁平 JSON）
+见 `command_access_tiers.md` 的 Tier E 段。关键点：这些是进程内存里的运行时状态，
+**只有用户开着 agy 会话时才有数据**，没会话时返回 `{"status": "no running agy
+session found"}`。
+
+### ⚠️ 留给下一个对话：Tier F（高难度，7 条指令）
 
 **Tier F — ConPTY 伪终端注入**（高难度，7 条指令）
 - 涉及：`/goal` `/schedule` `/grill-me` `/planning` `/fast` `/teamwork-preview`

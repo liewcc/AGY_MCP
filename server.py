@@ -45,6 +45,8 @@ from tier_c_commands import write_statusline_config as _write_statusline_config
 from tier_d_commands import logout as _logout
 from tier_d_commands import open_path as _open_path
 from tier_d_commands import show_diff as _show_diff
+from tier_e_commands import agent_session_state as _agent_session_state
+from tier_e_commands import list_tasks as _list_tasks
 
 mcp = FastMCP("agy-mcp")
 
@@ -455,6 +457,45 @@ async def logout() -> dict:
         {"deleted": [<files>], "status": "success"} or status dict.
     """
     return await asyncio.to_thread(_logout)
+
+
+# ---- Tier E: live runtime state of a running agy session (gRPC attach) ----
+
+
+@mcp.tool()
+async def list_tasks(conversation_id: Optional[str] = None) -> dict:
+    """List background shell commands in the running Antigravity session (/tasks).
+
+    Attaches to the user's *already-running* interactive `agy` process via its local
+    gRPC language server (this state is in-memory and only exists while agy runs —
+    there is nothing to read when no session is open).
+
+    Args:
+        conversation_id: Inspect a specific conversation; default = the active one.
+
+    Returns:
+        {"conversation_id", "tasks": [{command, cwd, summary, action, background,
+         wait_ms}]} — or {"status": "no running agy session found"}.
+    """
+    return await asyncio.to_thread(_list_tasks, conversation_id)
+
+
+@mcp.tool()
+async def agent_session_state(conversation_id: Optional[str] = None) -> dict:
+    """Agent / subagent runtime state of the running Antigravity session (/agents).
+
+    Attaches to the running `agy` process (see `list_tasks`) and returns the active
+    conversation, every loaded trajectory id (parent + spawned subagents), and the
+    tool actions currently in flight.
+
+    Args:
+        conversation_id: Inspect a specific conversation; default = the active one.
+
+    Returns:
+        {"conversation_id", "conversation_ids", "tool_actions": [{action, summary}],
+         "snapshot_bytes"} — or {"status": "no running agy session found"}.
+    """
+    return await asyncio.to_thread(_agent_session_state, conversation_id)
 
 
 if __name__ == "__main__":
