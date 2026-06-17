@@ -43,7 +43,7 @@ add features against `agy` using only this document.
 | C | 配置文件 settings/keybindings/mcp/statusline/hooks/skills | ✅ | `tier_c_commands.py` |
 | D | shell diff/open/logout + plugin | ✅ | `tier_d_commands.py` |
 | E | gRPC（usage + tasks + agents） | ✅ 3/3 | `agy_models.py` / `tier_e_commands.py` |
-| F | ConPTY 伪终端 | ❌ 0/7 | 未实现 |
+| F | ConPTY 伪终端 | ✅ 7/7 | `tier_f_commands.py` |
 
 验证方式：重启 MCP server 后新工具正确加载，真实读写 `mcp.json` 成功；Tier E 的
 `list_tasks` / `agent_session_state` 对一个正在跑 `ping -t 127.0.0.1` 的活跃 agy
@@ -58,19 +58,22 @@ attach 到用户正在运行的交互式 agy 进程**的本地 gRPC 语言服务
 **只有用户开着 agy 会话时才有数据**，没会话时返回 `{"status": "no running agy
 session found"}`。
 
-### ⚠️ 留给下一个对话：Tier F（高难度，7 条指令）
+### ✅ Tier F 已完成（2026-06-17）
 
-**Tier F — ConPTY 伪终端注入**（高难度，7 条指令）
-- 涉及：`/goal` `/schedule` `/grill-me` `/planning` `/fast` `/teamwork-preview`
-  （`/btw` 例外，可用 `--print` 单次调用模拟）。
-- 这些是纯会话内指令，无文件/DB/gRPC 落点，**只能**通过真伪终端模拟交互输入。
-- 可复用：`agy_models.py` 已有 Windows ConPTY 启动代码作为基础。
-- 路线：ConPTY 启动 agy 交互模式 → 向 stdin 写 `/goal ...` → 读 stdout（剥离 ANSI）。
-- **核心陷阱**（务必先读）：直接用管道 (`subprocess.PIPE`) 注入斜线指令**不行**——
-  agy 检测到非 TTY 会进入 print 模式，把 `/goal` 当成普通 prompt 发给模型，不解析
-  本地指令。必须用真 ConPTY 才会触发指令解析。此外 `/usage` 的 ConPTY 注入实验
-  曾失败（autocomplete 吞掉第一个 Enter，第二个 Enter 显示 "No matches"），注入
-  时序需要仔细处理（可能要先等补全弹窗、按 Esc 关掉、或精确控制 Enter 时机）。
+**Tier F — ConPTY 伪终端注入**（7 条指令）— 实现在 `tier_f_commands.py`
+
+涉及：`/goal` `/schedule` `/grill-me` `/planning` `/fast` `/teamwork-preview` `/btw`
+
+**技术路线**：
+1. Windows ConPTY（同 `agy_models.py` 的 `list_models`），启动 agy 交互模式。
+2. 等待 TUI 初始化（3.5 s）。
+3. 注入 `<slash_cmd>\x1b\r`（**ESC 关掉 autocomplete**，Enter 执行）。
+4. 读取 N 秒 stdout，去除 ANSI 转义，taskkill 进程树，返回截取文本。
+5. `/btw` 例外：直接用 `agy --print` 模拟，无需 PTY。
+
+**核心陷阱（已解决）**：
+- 直接管道注入 → agy 检测到非 TTY 进入 print 模式，把斜线命令当 prompt。
+- autocomplete 吞掉第一个裸 Enter（`/usage` 实验）→ 改用 ESC+Enter 序列。
 
 ---
 

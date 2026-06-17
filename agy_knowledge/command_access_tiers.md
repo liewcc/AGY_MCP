@@ -22,7 +22,7 @@ agy 是一个编译后的 Go 单体可执行文件（`%LOCALAPPDATA%\agy\bin\agy
 | **C** | 读写配置文件（JSON/YAML） | 低 | ✅ 已实现 6 类 |
 | **D** | shell 子命令 / 文件操作 | 低 | ✅ 已实现 4 条 |
 | **E** | 本地 gRPC 语言服务器 | 中 | ✅ 3/3（usage + tasks + agents） |
-| **F** | ConPTY 伪终端注入 | 高 | ⏳ 未实现 |
+| **F** | ConPTY 伪终端注入 | 高 | ✅ 已实现 7 条 |
 
 ---
 
@@ -205,21 +205,28 @@ trajectory id + 在跑的 tool action。
 | `/teamwork-preview` | 多代理协作预览 | 需 PTY |
 | `/btw <query>` | 后台侧问 | **可用 `--print` 单次调用模拟** |
 
-**技术路线**：复用 `agy_models.py` 已有的 Windows ConPTY 代码，
-启动 agy 交互模式 → 向 stdin 写入 `/goal ...` → 读取 stdout（去除 ANSI 转义）。
+**技术路线（已实现）**：`tier_f_commands.py` 复用 `agy_models.py` 的 Windows ConPTY
+代码，启动 agy 交互模式 → 等待 TUI 初始化（3.5 s）→ 向 stdin 写入
+`<slash_cmd>\x1b\r`（ESC 关掉补全下拉框，Enter 执行）→ 读取 stdout N 秒（去除 ANSI
+转义）→ taskkill 进程树 → 返回截取文本。
 
-⚠️ 已知陷阱：直接管道注入斜线指令会被当作 prompt 发给模型（agy 检测到非 TTY
-即进入 print 模式，不解析本地指令）。必须用真 PTY 才能触发指令解析。
-`/usage` 的 ConPTY 注入实验失败过（autocomplete 吞掉第一个 Enter），需注意。
+`/btw` 例外：用 `agy --print` 模拟（无需 PTY）。
+
+⚠️ 已知陷阱：
+- 直接管道注入斜线指令会被当作 prompt 发给模型（agy 检测到非 TTY 即进入 print 模式）。
+  必须用真 ConPTY 才能触发指令解析。
+- autocomplete 会吞掉第一个裸 Enter（`/usage` 实验发现）。解决方法：先发 ESC 关掉
+  补全，再发 Enter。
+- 各命令的 `wait_response_s` 需根据实际响应速度调整；`/planning` 最慢（12 s）。
 
 ---
 
 ## 实现进度汇总
 
-- **已实现工具：24 个**（Tier A 原有 + B/C/D 新增 19 个 + Tier E 的 tasks/agents 2 个）
+- **已实现工具：39 个**（含 Tier F 7 个新增 + 插件管理/changelog/write 类工具）
 - **已验证**：MCP server 重启后正确加载，真实调用读写均正常；Tier E 对活跃会话实测通过
-- **剩余**：Tier F 全部（需 PTY 封装），`/btw` 例外可用 `--print` 模拟
+- **剩余**：无 — 全部 Tier A–F 已完成
 
 代码文件：`agy_client.py`、`conversations.py`、`tier_c_commands.py`、
-`tier_d_commands.py`、`tier_e_commands.py`、`agy_models.py`，统一在 `server.py`
-注册为 MCP 工具。
+`tier_d_commands.py`、`tier_e_commands.py`、`tier_f_commands.py`、`agy_models.py`，
+统一在 `server.py` 注册为 MCP 工具。

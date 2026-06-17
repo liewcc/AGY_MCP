@@ -47,6 +47,13 @@ from tier_d_commands import open_path as _open_path
 from tier_d_commands import show_diff as _show_diff
 from tier_e_commands import agent_session_state as _agent_session_state
 from tier_e_commands import list_tasks as _list_tasks
+from tier_f_commands import ask_btw as _ask_btw
+from tier_f_commands import run_goal as _run_goal
+from tier_f_commands import start_grill_me as _start_grill_me
+from tier_f_commands import start_planning as _start_planning
+from tier_f_commands import start_schedule as _start_schedule
+from tier_f_commands import start_teamwork_preview as _start_teamwork_preview
+from tier_f_commands import toggle_fast_mode as _toggle_fast_mode
 
 mcp = FastMCP("agy-mcp")
 
@@ -496,6 +503,106 @@ async def agent_session_state(conversation_id: Optional[str] = None) -> dict:
          "snapshot_bytes"} — or {"status": "no running agy session found"}.
     """
     return await asyncio.to_thread(_agent_session_state, conversation_id)
+
+
+# ---- Tier F: ConPTY pseudo-terminal injection for interactive-only commands ----
+
+
+@mcp.tool()
+async def toggle_fast_mode() -> dict:
+    """Toggle agy's fast/thinking mode inside a fresh ConPTY session (/fast).
+
+    Launches agy interactively, injects /fast, and returns the mode-change
+    confirmation text captured from the TUI.
+
+    Returns:
+        {"output": <confirmation text>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_toggle_fast_mode)
+
+
+@mcp.tool()
+async def run_goal(description: str) -> dict:
+    """Set an autonomous execution goal in a fresh agy session (/goal).
+
+    Launches agy interactively, injects /goal <description>, captures the
+    initial ~10 s of output, then kills the session.  For a persistent
+    long-running goal the user should run /goal directly in their own terminal.
+
+    Args:
+        description: The goal to pursue (e.g. "refactor the auth module").
+
+    Returns:
+        {"output": <initial response>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_run_goal, description)
+
+
+@mcp.tool()
+async def start_planning(description: str = "") -> dict:
+    """Start a multi-turn planning session and capture the initial plan (/planning).
+
+    Args:
+        description: Optional planning prompt or context.
+
+    Returns:
+        {"output": <plan text>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_start_planning, description)
+
+
+@mcp.tool()
+async def start_schedule(description: str) -> dict:
+    """Set a scheduled/cron task in agy and capture the confirmation (/schedule).
+
+    Args:
+        description: Schedule description (e.g. "run tests every day at 9am").
+
+    Returns:
+        {"output": <schedule confirmation>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_start_schedule, description)
+
+
+@mcp.tool()
+async def start_grill_me() -> dict:
+    """Start an interactive Q&A alignment session and capture the first prompt (/grill-me).
+
+    Returns:
+        {"output": <first grill-me question>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_start_grill_me)
+
+
+@mcp.tool()
+async def start_teamwork_preview() -> dict:
+    """Launch multi-agent teamwork preview and capture the initial output (/teamwork-preview).
+
+    Returns:
+        {"output": <teamwork preview text>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_start_teamwork_preview)
+
+
+@mcp.tool()
+async def ask_btw(
+    query: str,
+    conversation: Optional[str] = None,
+) -> dict:
+    """Send a background side-question via agy --print (/btw).
+
+    agy's /btw asks a question in the background without interrupting the current
+    session.  We approximate it with a headless --print call: same OAuth auth,
+    independent conversation.
+
+    Args:
+        query:        The question to ask.
+        conversation: Conversation id to resume (optional).
+
+    Returns:
+        {"answer": <model text>, "conversation_id": <id>}
+    """
+    return await asyncio.to_thread(_ask_btw, query, conversation)
 
 
 if __name__ == "__main__":
