@@ -40,14 +40,37 @@ def get_agy_version() -> str:
     except Exception:
         return "(unknown)"
 
+
+def _get_agy_status() -> str:
+    """Check if agy/Antigravity processes are running (blocking, run in thread)."""
+    try:
+        r = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command",
+             "Get-Process -Name agy,Antigravity -ErrorAction SilentlyContinue "
+             "| Select-Object Id,Name,@{N='MB';E={[int]($_.WorkingSet/1MB)}} "
+             "| ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=5, creationflags=0x08000000,
+        )
+        raw = r.stdout.strip()
+        if not raw:
+            return "[dim]no agy processes[/dim]"
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = [data]
+        lines = ["[green]● agy processes[/green]"]
+        for p in data:
+            lines.append(f"  [dim]PID {p['Id']}[/dim]  {p['Name']}  {p['MB']} MB")
+        return "\n".join(lines)
+    except Exception:
+        return "[dim]agy status unknown[/dim]"
+
 class ProfileCard(Static):
     """Displays login profile information."""
 
     email = reactive("(not signed in)")
 
     def render(self) -> str:
-        return f"""[bold]Profile[/bold]
-Current: {self.email}"""
+        return f"Profile: {self.email}"
 
 
 class ModelsPanel(Static):
@@ -277,21 +300,37 @@ class CredentialPanel(Static):
         with Horizontal(id="cred-buttons"):
             yield Button("Log In", id="btn-login", variant="primary")
             yield Button("Log Out", id="btn-logout", variant="default")
+            yield Button("Shut Down", id="btn-shutdown", variant="error")
+        yield Static("[dim]○ agy status unknown[/dim]", id="agy-status")
         yield Static("", id="cred-info")
 
     def on_mount(self) -> None:
         self.refresh_info()
+        self.set_interval(2, self._poll_status)
+
+    def _poll_status(self) -> None:
+        threading.Thread(target=self._check_status, daemon=True).start()
+
+    def _check_status(self) -> None:
+        status = _get_agy_status()
+        self.app.call_from_thread(self._apply_status, status)
+
+    def _apply_status(self, status: str) -> None:
+        try:
+            self.query_one("#agy-status", Static).update(status)
+        except Exception:
+            pass
 
     def refresh_info(self) -> None:
         version = get_agy_version()
         model = self.app._get_selected_model() or "(none)"
         workspace = os.getcwd()
         self.query_one("#cred-info", Static).update(
-            f"\n"
             f"  [dim]Version:    [/dim]{version}\n"
             f"  [dim]Model:      [/dim]{model}\n"
             f"  [dim]Workspace:  [/dim]{workspace}"
         )
+        threading.Thread(target=self._check_status, daemon=True).start()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-login":
@@ -299,6 +338,8 @@ class CredentialPanel(Static):
         elif event.button.id == "btn-logout":
             self.app._do_logout()
             self.refresh_info()
+        elif event.button.id == "btn-shutdown":
+            self.app._do_shutdown()
         event.stop()
 
 
@@ -330,7 +371,7 @@ class AGYMCPApp(App):
 
     #profile-section {
         width: 100%;
-        height: 5;
+        height: 3;
         border-bottom: solid $accent;
         padding: 1;
         background: $surface;
@@ -348,6 +389,10 @@ class AGYMCPApp(App):
     #cred-buttons Button {
         width: auto;
         margin: 0 1 0 0;
+    }
+
+    #agy-status {
+        padding: 0 1 1 1;
     }
 
     #cred-info {
@@ -532,6 +577,15 @@ class AGYMCPApp(App):
             panel.models = []
         except Exception:
             pass
+
+    def _do_shutdown(self) -> None:
+        """Kill all agy/Antigravity processes."""
+        for name in ("agy.exe", "Antigravity.exe"):
+            subprocess.run(
+                ["taskkill", "/F", "/IM", name, "/T"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,
+            )
 
 
 if __name__ == "__main__":
