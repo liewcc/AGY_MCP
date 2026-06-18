@@ -13,12 +13,15 @@ import urllib.request
 
 import win32cred
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, Container
+from textual.containers import Horizontal, Vertical, Container, VerticalScroll
 from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, Button, ContentSwitcher, OptionList
 from textual.widgets.option_list import Option
 from textual.reactive import reactive
+from textual.events import Click
 
-from agy_core import list_models, get_quota_summary, get_context_stats
+import datetime
+
+from agy_core import list_models, get_quota_summary, get_context_stats, list_conversations as _list_conversations, CONV_DIR, read_conversation
 
 # Configuration
 AGY_BIN = Path(
@@ -292,6 +295,325 @@ class ContentPanel(Static):
         )
 
 
+class ChatHistoryPanel(Vertical):
+    """Chat History panel — list and delete past agy conversations."""
+
+    def compose(self) -> ComposeResult:
+        with ContentSwitcher(id="chats-switcher", initial="chats-list-view"):
+            with Vertical(id="chats-list-view"):
+                yield OptionList(id="chats-list")
+                yield Static(id="chat-detail")
+                with Horizontal(id="chats-actions"):
+                    yield Button("↻ Reload", id="btn-reload-chats")
+                    yield Button("🗑 Delete", id="btn-delete-chat", variant="error", disabled=True)
+                    yield Button("🗑 Delete All", id="btn-delete-all", variant="error")
+
+            with Vertical(id="chats-detail-view"):
+                with VerticalScroll(id="chats-scroll-area"):
+                    yield Static("", id="chats-full-text", markup=False)
+                with Horizontal(id="chats-detail-actions"):
+                    yield Button("🗑 Delete", id="btn-detail-delete-chat", variant="error")
+                    yield Button("🗑 Delete All", id="btn-detail-delete-all", variant="error")
+                    yield Button("←", id="btn-prev-chat")
+                    yield Button("→", id="btn-next-chat")
+                    yield Button("🏠 Home", id="btn-home")
+
+    def on_mount(self) -> None:
+        self._conversations: list = []
+        self._selected_idx: int | None = None
+        self._last_click_time: float = 0.0
+        self._last_click_idx: int | None = None
+        self._load_async()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        try:
+            if event.button.id == "btn-reload-chats":
+                self._load_async()
+            elif event.button.id in ("btn-delete-chat", "btn-detail-delete-chat"):
+                self._delete_selected()
+                self._go_home()
+            elif event.button.id in ("btn-delete-all", "btn-detail-delete-all"):
+                self._delete_all()
+                self._go_home()
+            elif event.button.id == "btn-prev-chat":
+                self._select_prev_chat()
+            elif event.button.id == "btn-next-chat":
+                self._select_next_chat()
+            elif event.button.id == "btn-home":
+                self._go_home()
+            event.stop()
+        except Exception:
+            pass
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        try:
+            idx = event.option_index
+            if idx is None or not self._conversations or idx < 0 or idx >= len(self._conversations):
+                return
+
+            now = time.time()
+            last_time = getattr(self, "_last_click_time", 0.0)
+            last_idx = getattr(self, "_last_click_idx", None)
+
+            if now - last_time <= 0.35 and last_idx == idx:
+                # Double click
+                self._selected_idx = idx
+                self._show_conversation(idx)
+                try:
+                    switcher = self.query_one("#chats-switcher", ContentSwitcher)
+                    switcher.current = "chats-detail-view"
+                except Exception:
+                    pass
+                self._last_click_time = 0.0
+                self._last_click_idx = None
+            else:
+                # Single click
+                self._last_click_time = now
+                self._last_click_idx = idx
+                self._selected_idx = idx
+                self._update_detail(idx)
+                try:
+                    self.query_one("#btn-delete-chat", Button).disabled = False
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _show_conversation(self, idx: int | None) -> None:
+        try:
+            if idx is None or idx < 0 or not self._conversations or idx >= len(self._conversations):
+                try:
+                    self.query_one("#chats-full-text", Static).update("")
+                except Exception:
+                    pass
+                return
+
+            c = self._conversations[idx]
+            conv_id = c["id"]
+
+            def work():
+                try:
+                    turns = read_conversation(conv_id)
+                    formatted_turns = []
+                    for t in turns:
+                        who = "USER" if t["role"] == "user" else "MODEL"
+                        formatted_turns.append(f"### {who}\n{t['text']}")
+                    text = "\n\n".join(formatted_turns) if formatted_turns else "(empty conversation)"
+                except Exception as e:
+                    text = f"Error reading conversation {conv_id}: {e}"
+                self.app.call_from_thread(self._apply_conversation_text, idx, text)
+
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            pass
+
+    def _apply_conversation_text(self, idx: int, text: str) -> None:
+        try:
+            if self._selected_idx != idx:
+                return
+            try:
+                self.query_one("#chats-full-text", Static).update(text)
+                self.query_one("#chats-scroll-area", VerticalScroll).scroll_to(y=0, animate=False)
+            except Exception:
+                pass
+
+            try:
+                prev_btn = self.query_one("#btn-prev-chat", Button)
+                next_btn = self.query_one("#btn-next-chat", Button)
+                prev_btn.disabled = (idx == 0)
+                next_btn.disabled = (idx >= len(self._conversations) - 1)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _select_prev_chat(self) -> None:
+        try:
+            if not self._conversations:
+                return
+            if self._selected_idx is None:
+                self._selected_idx = 0
+            elif self._selected_idx > 0:
+                self._selected_idx -= 1
+            self._show_conversation(self._selected_idx)
+            self._update_detail(self._selected_idx)
+            try:
+                ol = self.query_one("#chats-list", OptionList)
+                ol.highlighted = self._selected_idx
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _select_next_chat(self) -> None:
+        try:
+            if not self._conversations:
+                return
+            if self._selected_idx is None:
+                self._selected_idx = 0
+            elif self._selected_idx < len(self._conversations) - 1:
+                self._selected_idx += 1
+            self._show_conversation(self._selected_idx)
+            self._update_detail(self._selected_idx)
+            try:
+                ol = self.query_one("#chats-list", OptionList)
+                ol.highlighted = self._selected_idx
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _go_home(self) -> None:
+        try:
+            switcher = self.query_one("#chats-switcher", ContentSwitcher)
+            switcher.current = "chats-list-view"
+        except Exception:
+            pass
+
+    def _load_async(self) -> None:
+        try:
+            ol = self.query_one("#chats-list", OptionList)
+            ol.clear_options()
+            ol.add_option(Option("Loading...", disabled=True))
+            self.query_one("#btn-delete-chat", Button).disabled = True
+            self.query_one("#chats-full-text", Static).update("")
+            self.query_one("#chat-detail", Static).update("")
+        except Exception:
+            pass
+        threading.Thread(target=self._load, daemon=True).start()
+
+    def _load(self) -> None:
+        try:
+            convs = _list_conversations(limit=50)
+            self.app.call_from_thread(self._apply, convs)
+        except Exception:
+            pass
+
+    def _apply(self, convs: list) -> None:
+        try:
+            self._conversations = convs
+            self._selected_idx = None
+            try:
+                ol = self.query_one("#chats-list", OptionList)
+                ol.clear_options()
+                if not convs:
+                    ol.add_option(Option("(no conversations)", disabled=True))
+                    return
+                for c in convs:
+                    date = datetime.datetime.fromtimestamp(c["modified"]).strftime("%m-%d %H:%M")
+                    title = c["title"][:55].replace("\n", " ").replace("\x1a", "").replace("\x14", "")
+                    turns = c["user_turns"]
+                    ol.add_option(Option(f"[{date}] ({turns}t) {title}"))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _update_detail(self, idx: int | None) -> None:
+        try:
+            if idx is None or idx < 0 or not self._conversations or idx >= len(self._conversations):
+                try:
+                    self.query_one("#chat-detail", Static).update("")
+                except Exception:
+                    pass
+                return
+            c = self._conversations[idx]
+            conv_id = c["id"]
+            kb = c["db_bytes"] // 1024
+            date = datetime.datetime.fromtimestamp(c["modified"]).strftime("%Y-%m-%d %H:%M")
+            detail = (
+                f"[dim]ID:[/dim]    {conv_id}\n"
+                f"[dim]Date:[/dim]  {date}  "
+                f"[dim]Turns:[/dim] {c['user_turns']}  [dim]Size:[/dim] {kb} KB\n"
+                f"[dim]Tokens:[/dim] Loading..."
+            )
+            try:
+                self.query_one("#chat-detail", Static).update(detail)
+            except Exception:
+                pass
+
+            def work():
+                try:
+                    stats = get_context_stats(conv_id)
+                except Exception as e:
+                    stats = {"error": str(e)}
+                self.app.call_from_thread(self._apply_token_stats, idx, stats)
+
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            pass
+
+    def _apply_token_stats(self, idx: int, stats: dict) -> None:
+        try:
+            if self._selected_idx != idx:
+                return
+            if idx < 0 or not self._conversations or idx >= len(self._conversations):
+                return
+            c = self._conversations[idx]
+            conv_id = c["id"]
+            kb = c["db_bytes"] // 1024
+            date = datetime.datetime.fromtimestamp(c["modified"]).strftime("%Y-%m-%d %H:%M")
+
+            if "error" in stats:
+                token_str = f"[red]Error: {stats['error']}[/red]"
+            else:
+                total = stats.get("total_tokens", 0)
+                user = stats.get("user_tokens", 0)
+                model = stats.get("model_tokens", 0)
+                tool = stats.get("tool_tokens", 0)
+                token_str = f"{total} (User: {user}, Model: {model}, Tool: {tool})"
+
+            detail = (
+                f"[dim]ID:[/dim]    {conv_id}\n"
+                f"[dim]Date:[/dim]  {date}  "
+                f"[dim]Turns:[/dim] {c['user_turns']}  [dim]Size:[/dim] {kb} KB\n"
+                f"[dim]Tokens:[/dim] {token_str}"
+            )
+            try:
+                self.query_one("#chat-detail", Static).update(detail)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _delete_selected(self) -> None:
+        try:
+            if self._selected_idx is None or not self._conversations or self._selected_idx >= len(self._conversations):
+                return
+            c = self._conversations[self._selected_idx]
+            path = os.path.join(CONV_DIR, c["id"] + ".db")
+            
+            def work():
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
+                self.app.call_from_thread(self._load_async)
+                
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            pass
+
+    def _delete_all(self) -> None:
+        try:
+            convs = list(self._conversations)
+            
+            def work():
+                for c in convs:
+                    path = os.path.join(CONV_DIR, c["id"] + ".db")
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
+                self.app.call_from_thread(self._load_async)
+                
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            pass
+
+
 class CredentialPanel(Static):
     """Credential view: log in / log out buttons and CLI info."""
 
@@ -349,6 +671,7 @@ class AGYMCPApp(App):
     CSS = """
     Screen {
         background: $surface;
+        height: 50vh;
     }
 
     #main-container {
@@ -371,10 +694,10 @@ class AGYMCPApp(App):
 
     #profile-section {
         width: 100%;
-        height: 3;
+        height: 4;
         border-bottom: solid $accent;
-        padding: 1;
-        background: $surface;
+        padding: 1 1 0 1;
+        background: $boost;
     }
 
     #cred-header {
@@ -430,6 +753,62 @@ class AGYMCPApp(App):
         height: 1fr;
         border: solid $accent-darken-1;
     }
+
+    #chats-switcher {
+        width: 100%;
+        height: 1fr;
+    }
+
+    #chats-list-view {
+        width: 100%;
+        height: 100%;
+        layout: vertical;
+    }
+
+    #chats-detail-view {
+        width: 100%;
+        height: 100%;
+        layout: vertical;
+    }
+
+    #chats-list {
+        height: 1fr;
+        border: solid $accent-darken-1;
+    }
+
+    #chats-scroll-area {
+        height: 1fr;
+        border: solid $accent-darken-1;
+        padding: 1 2;
+    }
+
+    #chats-full-text {
+        width: 100%;
+        height: auto;
+    }
+
+    #chat-detail {
+        height: auto;
+        padding: 0 1;
+    }
+
+    #chats-actions, #chats-detail-actions {
+        height: auto;
+        padding: 0;
+        margin-top: 1;
+    }
+
+    #chats-actions Button, #chats-detail-actions Button {
+        width: auto;
+        margin: 0 1 0 0;
+        height: 1;
+        min-height: 1;
+        border: none;
+    }
+
+    OptionList > .option--option {
+        padding: 0 1;
+    }
     """
 
     TITLE = "AGY MCP - Control Panel"
@@ -453,6 +832,7 @@ class AGYMCPApp(App):
                 yield ListItem(Label("📊 Models"), id="nav-models")
                 yield ListItem(Label("📈 Quota"), id="nav-quota")
                 yield ListItem(Label("📝 Content"), id="nav-content")
+                yield ListItem(Label("💬 Chat History"), id="nav-chats")
 
             # Right content area
             with Vertical(id="content-area"):
@@ -465,6 +845,7 @@ class AGYMCPApp(App):
                     yield ModelsPanel(id="models-view", classes="panel-content")
                     yield QuotaPanel(id="quota-view", classes="panel-content")
                     yield ContentPanel(id="content-view", classes="panel-content")
+                    yield ChatHistoryPanel(id="chat-history-view", classes="panel-content")
 
         yield Footer()
 
@@ -485,6 +866,8 @@ class AGYMCPApp(App):
             switcher.current = "quota-view"
         elif event.item.id == "nav-content":
             switcher.current = "content-view"
+        elif event.item.id == "nav-chats":
+            switcher.current = "chat-history-view"
 
     def _update_profile(self) -> None:
         """Update profile card with current email."""
