@@ -344,12 +344,15 @@ def ask_agy(
 
 
 def run_agy_subcommand(*args: str, timeout: int = 30) -> str:
-    """Run an agy subcommand and return its stdout+stderr."""
+    """Run an agy subcommand and return its stdout (stderr kept separate)."""
     cmd = [AGY_BIN] + list(args)
+    env = {**os.environ, "NO_COLOR": "1", "TERM": "dumb"}
     try:
         res = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=timeout, creationflags=_CREATE_NO_WINDOW,
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", timeout=timeout,
+            creationflags=_CREATE_NO_WINDOW, env=env,
         )
         out = res.stdout or ""
         if res.returncode != 0:
@@ -357,6 +360,15 @@ def run_agy_subcommand(*args: str, timeout: int = 30) -> str:
         return out
     except subprocess.TimeoutExpired:
         return f"Timed out after {timeout}s"
+
+
+def _ensure_console_session() -> None:
+    """Allocate a hidden console so ConPTY works from a headless (no-console) process."""
+    if _k32.GetConsoleWindow() == 0:
+        _k32.AllocConsole()
+        hwnd = _k32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
 
 
 # ---------------------------------------------------------------------------
@@ -380,42 +392,127 @@ def _settings_model() -> str | None:
     return None
 
 
-def list_models(deadline_s: float = 12.0) -> list[str]:
-    """Return available model display labels by running 'agy models' via ConPTY.
+_MODEL_NAME_RE = re.compile(r'((?:Gemini|Claude|GPT)[A-Za-z0-9 .\-]*\([A-Za-z]+\))')
 
-    Launches 'agy models', captures its output (which lists model names after a
-    short spinner), parses the lines, then kills the process.  Falls back to just
-    the current settings.json model if ConPTY fails or times out.
+
+def list_models(deadline_s: float = 25.0) -> list[str]:
+    """Return available model display labels via agy gRPC GetAvailableModels.
+
+    Starts a headless agy instance, waits for its gRPC language server, calls
+    GetAvailableModels, extracts display names from the protobuf response, then
+    kills the temporary agy process.  Falls back to settings.json current model.
     """
-    res = _conpty_start(f'"{AGY_BIN}" models', width=200)
-    if not res:
-        current = _settings_model()
-        return [current] if current else []
+    _dbg = open(r"D:\AI\AGY_MCP\_models_debug.txt", "w", encoding="utf-8")
 
-    hpc, pi, in_write, out_read = res
-    chunks, t = _read_pty(out_read)
-    t.join(timeout=deadline_s)  # agy models exits naturally after printing the list
-    _conpty_kill(pi.dwProcessId, hpc, pi, in_write, out_read)
-    t.join(timeout=3)
-
-    raw = b''.join(chunks).decode('utf-8', errors='replace')
-    clean = _ANSI.sub('', raw)
-    clean = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', clean)
-
-    models = []
-    seen: set[str] = set()
-    for line in clean.split('\n'):
-        line = line.strip()
-        if line and 'Fetching' not in line and re.match(r'^[A-Z]', line) and line not in seen:
-            seen.add(line)
-            models.append(line)
-
-    # Always include the current selection from settings.json
     current = _settings_model()
-    if current and current not in seen:
-        models.insert(0, current)
+    fallback = [current] if current else []
+    _dbg.write(f"current={current}\ngrpc={grpc}\nagy_exists={os.path.isfile(AGY_BIN)}\n")
 
-    return models if models else ([current] if current else [])
+    if grpc is None or not os.path.isfile(AGY_BIN):
+        _dbg.write("EARLY RETURN: grpc None or no binary\n"); _dbg.close()
+        return fallback
+
+    def _local_ports() -> set[int]:
+        r = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command",
+             "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 "
+             "-ErrorAction SilentlyContinue | Select-Object LocalPort | ConvertTo-Json"],
+            capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
+        )
+        return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
+
+    ports_before = _local_ports()
+    _dbg.write(f"ports_before={len(ports_before)}\n"); _dbg.flush()
+    proc = subprocess.Popen(
+        [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
+    )
+    _dbg.write(f"agy spawned pid={proc.pid}\n"); _dbg.flush()
+    try:
+        grpc_port: int | None = None
+        deadline = time.time() + deadline_s
+        while time.time() < deadline:
+            time.sleep(0.5)
+            new_ports = _local_ports() - ports_before
+            if len(new_ports) >= 2:
+                grpc_port = min(new_ports)
+                break
+        _dbg.write(f"grpc_port={grpc_port}\n"); _dbg.flush()
+        if grpc_port is None:
+            _dbg.write("FALLBACK: no grpc port found\n"); _dbg.close()
+            return fallback
+
+        time.sleep(4.0)
+
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+        try:
+            with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
+                with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
+                    cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
+            _dbg.write("ssl cert extracted ok\n"); _dbg.flush()
+        except Exception as e:
+            _dbg.write(f"ssl FAILED: {e}\n"); _dbg.close()
+            return fallback
+
+        creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
+        opts = [("grpc.ssl_target_name_override", "localhost"),
+                ("grpc.default_authority", "localhost")]
+        channel = grpc.secure_channel(f"127.0.0.1:{grpc_port}", creds, options=opts)
+        try:
+            stub = channel.unary_unary(
+                "/exa.language_server_pb.LanguageServerService/GetAvailableModels",
+                request_serializer=bytes, response_deserializer=bytes,
+            )
+            resp: bytes = stub(b"", timeout=10)
+            _dbg.write(f"grpc ok, resp_len={len(resp)}\n"); _dbg.flush()
+        except Exception as e:
+            _dbg.write(f"grpc FAILED: {e}\n"); _dbg.close()
+            return fallback
+        finally:
+            channel.close()
+
+        # Use _strings() to properly parse protobuf rather than regex on raw bytes.
+        # Require a trailing (Tier) suffix to match only selectable model entries;
+        # this filters out internal base-model names like "Gemini 3 Flash" that
+        # appear in other protobuf fields alongside the real display names.
+        _MODEL_RE = re.compile(r'^(?:Gemini|Claude|GPT).+\([A-Za-z][A-Za-z0-9 ]*\)\s*$')
+        seen: set[str] = set()
+        models: list[str] = []
+        all_strings = _strings(resp)
+        _dbg.write(f"strings extracted: {len(all_strings)}\n")
+        for _fn, s in all_strings:
+            s = s.strip()
+            if s and _MODEL_RE.match(s) and len(s) <= 80 and s not in seen:
+                seen.add(s)
+                models.append(s)
+                _dbg.write(f"  model: {s!r}\n")
+        _dbg.write(f"total models found: {len(models)}\n"); _dbg.close()
+
+        _TIER = {"High": 0, "Medium": 1, "Low": 2, "Thinking": 3}
+        _VENDOR = {"Gemini": 0, "Claude": 1, "GPT": 2}
+
+        def _sort_key(name: str):
+            vendor = next((v for k, v in _VENDOR.items() if name.startswith(k)), 9)
+            ver = re.search(r'(\d+\.?\d*)', name)
+            tier = re.search(r'\(([^)]+)\)\s*$', name)
+            base = re.sub(r'\s*\([^)]+\)\s*$', '', name)
+            return (vendor, -(float(ver.group(1)) if ver else 0), base,
+                    _TIER.get(tier.group(1) if tier else "", 99))
+
+        models.sort(key=_sort_key)
+
+        if current and current not in seen:
+            models.insert(0, current)
+
+        return models if models else fallback
+    finally:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
+        )
 
 
 def _parse_quota_proto(data: bytes) -> dict | None:
@@ -1416,6 +1513,7 @@ def _pty_inject_slash(
     """Start agy in interactive ConPTY mode, inject a slash command, return output."""
     if not os.path.isfile(AGY_BIN):
         return {"error": f"agy not found: {AGY_BIN}"}
+    _ensure_console_session()
 
     res = _conpty_start(f'"{AGY_BIN}"')
     if res is None:
@@ -1443,6 +1541,37 @@ def _pty_inject_slash(
 def toggle_fast_mode() -> dict:
     """/fast — toggle agy fast/thinking mode."""
     return _pty_inject_slash("/fast", wait_startup_s=3.5, wait_response_s=5.0)
+
+
+def _debug_model_raw() -> str:
+    """Return raw cleaned ConPTY output from /model injection for debugging."""
+    if not os.path.isfile(AGY_BIN):
+        return f"agy not found: {AGY_BIN}"
+    res = _conpty_start(f'"{AGY_BIN}"')
+    if not res:
+        return "ConPTY creation failed"
+    hpc, pi, in_write, out_read = res
+    chunks, t = _read_pty(out_read)
+    pid = pi.dwProcessId
+    written = ctypes.c_ulong(0)
+    try:
+        time.sleep(4.0)
+        _k32.WriteFile(in_write, b"/model\r\n", 8, ctypes.byref(written), None)
+        time.sleep(3.0)
+        _k32.WriteFile(in_write, b"\x1b", 1, ctypes.byref(written), None)
+        time.sleep(0.5)
+    finally:
+        _conpty_kill(pid, hpc, pi, in_write, out_read)
+        t.join(timeout=3.0)
+    raw = b"".join(chunks).decode("utf-8", "replace")
+    clean = _ANSI.sub("", raw)
+    clean = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', clean)
+    return clean[-3000:] if len(clean) > 3000 else clean
+
+
+def set_model(model_name: str) -> dict:
+    """/model — switch the active model (persists across sessions)."""
+    return _pty_inject_slash(f"/model {model_name}", wait_startup_s=3.5, wait_response_s=6.0)
 
 
 def run_goal(description: str) -> dict:
