@@ -14,7 +14,7 @@ import urllib.request
 import win32cred
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container, VerticalScroll
-from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, Button, ContentSwitcher, OptionList
+from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, Button, ContentSwitcher, OptionList, Input
 from textual.widgets.option_list import Option
 from textual.reactive import reactive
 from textual.events import Click
@@ -85,9 +85,16 @@ class ModelsPanel(Static):
 
     def compose(self) -> ComposeResult:
         """Compose models panel."""
-        yield Static("[bold cyan]Available Models[/bold cyan]", id="models-header")
+        with Horizontal(id="models-header-row"):
+            yield Static("[bold cyan]Available Models[/bold cyan]", id="models-header")
+            yield Button("↻ Reload", id="btn-reload-models")
         yield Static("[dim]Current: (none)[/dim]", id="models-selected")
         yield OptionList(id="models-optionlist")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-reload-models":
+            self.app._load_models_async()
+            event.stop()
 
     def watch_loading(self, _=None) -> None:
         self._rebuild_list()
@@ -138,14 +145,9 @@ class QuotaPanel(Static):
     def compose(self) -> ComposeResult:
         """Compose quota panel with reload button."""
         yield Button("↻ Reload", id="btn-reload-quota")
-        yield Static("""[bold cyan]Quota Information[/bold cyan]
-
-[dim]Loading quota data...[/dim]
-
-Features to implement:
-  • Weekly/Five-Hour limits
-  • Individual model quotas
-  • Session usage tracking""", id="quota-content")
+        with VerticalScroll(id="quota-scroll"):
+            yield Static("[bold cyan]Quota Information[/bold cyan]\n\n[dim]Loading quota data...[/dim]",
+                         id="quota-content")
         # Auto-load quota on mount
         self._load_quota_async()
 
@@ -222,7 +224,8 @@ class ContentPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield Button("↻ Reload", id="btn-reload-context")
-        yield Static("[dim]Loading context stats...[/dim]", id="context-content")
+        with VerticalScroll(id="context-scroll"):
+            yield Static("[dim]Loading context stats...[/dim]", id="context-content")
 
     def on_mount(self) -> None:
         self._load_async()
@@ -614,8 +617,34 @@ class ChatHistoryPanel(Vertical):
             pass
 
 
+class WorkspaceItem(Horizontal):
+    """Single trusted-workspace row with a delete button."""
+
+    def __init__(self, path: str, index: int) -> None:
+        super().__init__(classes="ws-item")
+        self._path = path
+        self._index = index
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._path, classes="ws-path")
+        yield Button("✕", id=f"del-ws-{self._index}", classes="ws-del-btn")
+
+
 class CredentialPanel(Static):
-    """Credential view: log in / log out buttons and CLI info."""
+    """Credential view: log in / log out, workspace manager, agy status."""
+
+    _SETTINGS = Path(os.path.expanduser("~")) / ".gemini" / "antigravity-cli" / "settings.json"
+
+    def _read_settings(self) -> dict:
+        if self._SETTINGS.exists():
+            with open(self._SETTINGS, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    def _write_settings(self, data: dict) -> None:
+        self._SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._SETTINGS, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
 
     def compose(self) -> ComposeResult:
         yield Static("[bold cyan]Credential[/bold cyan]", id="cred-header")
@@ -623,12 +652,27 @@ class CredentialPanel(Static):
             yield Button("Log In", id="btn-login", variant="primary")
             yield Button("Log Out", id="btn-logout", variant="default")
             yield Button("Shut Down", id="btn-shutdown", variant="error")
-        yield Static("[dim]○ agy status unknown[/dim]", id="agy-status")
         yield Static("", id="cred-info")
+        yield Static("[bold]Trusted Workspaces[/bold]", id="ws-header")
+        with VerticalScroll(id="ws-list"):
+            pass
+        with Horizontal(id="ws-add-row"):
+            yield Input(placeholder="Add workspace path…", id="ws-input")
+            yield Button("+", id="btn-add-ws", variant="success")
+        yield Static("[dim]○ agy status unknown[/dim]", id="agy-status")
 
     def on_mount(self) -> None:
         self.refresh_info()
+        self._reload_workspaces()
         self.set_interval(2, self._poll_status)
+
+    def _reload_workspaces(self) -> None:
+        data = self._read_settings()
+        workspaces = data.get("trustedWorkspaces", [])
+        ws_list = self.query_one("#ws-list", VerticalScroll)
+        ws_list.remove_children()
+        for i, path in enumerate(workspaces):
+            ws_list.mount(WorkspaceItem(path, i))
 
     def _poll_status(self) -> None:
         threading.Thread(target=self._check_status, daemon=True).start()
@@ -646,22 +690,42 @@ class CredentialPanel(Static):
     def refresh_info(self) -> None:
         version = get_agy_version()
         model = self.app._get_selected_model() or "(none)"
-        workspace = os.getcwd()
         self.query_one("#cred-info", Static).update(
             f"  [dim]Version:    [/dim]{version}\n"
-            f"  [dim]Model:      [/dim]{model}\n"
-            f"  [dim]Workspace:  [/dim]{workspace}"
+            f"  [dim]Model:      [/dim]{model}"
         )
         threading.Thread(target=self._check_status, daemon=True).start()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-login":
+        bid = event.button.id
+        if bid == "btn-login":
             self.app._do_login()
-        elif event.button.id == "btn-logout":
+        elif bid == "btn-logout":
             self.app._do_logout()
             self.refresh_info()
-        elif event.button.id == "btn-shutdown":
+        elif bid == "btn-shutdown":
             self.app._do_shutdown()
+        elif bid == "btn-add-ws":
+            inp = self.query_one("#ws-input", Input)
+            path = inp.value.strip()
+            if path:
+                data = self._read_settings()
+                ws = data.get("trustedWorkspaces", [])
+                if path not in ws:
+                    ws.append(path)
+                    data["trustedWorkspaces"] = ws
+                    self._write_settings(data)
+                    self._reload_workspaces()
+                inp.value = ""
+        elif bid and bid.startswith("del-ws-"):
+            idx = int(bid.split("-")[-1])
+            data = self._read_settings()
+            ws = data.get("trustedWorkspaces", [])
+            if 0 <= idx < len(ws):
+                ws.pop(idx)
+                data["trustedWorkspaces"] = ws
+                self._write_settings(data)
+                self._reload_workspaces()
         event.stop()
 
 
@@ -714,12 +778,55 @@ class AGYMCPApp(App):
         margin: 0 1 0 0;
     }
 
-    #agy-status {
+    #cred-info {
         padding: 0 1 1 1;
     }
 
-    #cred-info {
+    #ws-header {
+        padding: 0 1 0 1;
+    }
+
+    #ws-list {
+        height: auto;
+        max-height: 6;
         padding: 0 1;
+    }
+
+    .ws-item {
+        height: 1;
+        width: 100%;
+    }
+
+    .ws-path {
+        width: 1fr;
+    }
+
+    .ws-del-btn {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        min-height: 1;
+        border: none;
+        margin: 0;
+    }
+
+    #ws-add-row {
+        height: 3;
+        padding: 0 1;
+        margin-top: 1;
+    }
+
+    #ws-input {
+        width: 1fr;
+    }
+
+    #btn-add-ws {
+        width: 5;
+        margin: 0 0 0 1;
+    }
+
+    #agy-status {
+        padding: 1 1 0 1;
     }
 
     #content-switcher {
@@ -741,8 +848,23 @@ class AGYMCPApp(App):
         padding: 0 1;
     }
 
+    #models-header-row {
+        height: auto;
+        padding: 0 0 0 1;
+        align: left middle;
+    }
+
     #models-header {
-        padding: 0 1;
+        width: 1fr;
+        padding: 0;
+    }
+
+    #btn-reload-models {
+        width: auto;
+        height: 1;
+        min-height: 1;
+        border: none;
+        margin: 0 1 0 0;
     }
 
     #models-selected {
@@ -752,6 +874,12 @@ class AGYMCPApp(App):
     #models-optionlist {
         height: 1fr;
         border: solid $accent-darken-1;
+    }
+
+    #quota-scroll, #context-scroll {
+        height: 1fr;
+        border: solid $accent-darken-1;
+        padding: 1;
     }
 
     #chats-switcher {
@@ -828,7 +956,7 @@ class AGYMCPApp(App):
         with Horizontal(id="main-container"):
             # Left sidebar - Navigation
             with ListView(id="sidebar"):
-                yield ListItem(Label("🔑 Credential"), id="nav-credential")
+                yield ListItem(Label("🏠 Home"), id="nav-credential")
                 yield ListItem(Label("📊 Models"), id="nav-models")
                 yield ListItem(Label("📈 Quota"), id="nav-quota")
                 yield ListItem(Label("📝 Content"), id="nav-content")
@@ -855,19 +983,23 @@ class AGYMCPApp(App):
         self._update_profile()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Handle sidebar navigation."""
+        """Handle sidebar navigation — always reload on entry."""
         switcher = self.query_one(ContentSwitcher)
 
         if event.item.id == "nav-credential":
             switcher.current = "credential-view"
         elif event.item.id == "nav-models":
             switcher.current = "models-view"
+            self._load_models_async()
         elif event.item.id == "nav-quota":
             switcher.current = "quota-view"
+            self.query_one(QuotaPanel)._reload_quota()
         elif event.item.id == "nav-content":
             switcher.current = "content-view"
+            self.query_one(ContentPanel)._load_async()
         elif event.item.id == "nav-chats":
             switcher.current = "chat-history-view"
+            self.query_one(ChatHistoryPanel)._load_async()
 
     def _update_profile(self) -> None:
         """Update profile card with current email."""
