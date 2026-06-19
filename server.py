@@ -25,6 +25,8 @@ with open(_log, "a", encoding="utf-8") as _f:
 from agy_core import (
     ask_agy, run_agy_subcommand,
     list_models as _list_models,
+    get_quota_summary as _get_quota_summary,
+    get_context_stats as _get_context_stats,
     export_conversation as _export_conversation,
     fork_conversation as _fork_conversation,
     format_transcript as _format_transcript,
@@ -55,6 +57,7 @@ from agy_core import (
     start_schedule as _start_schedule,
     start_teamwork_preview as _start_teamwork_preview,
     toggle_fast_mode as _toggle_fast_mode,
+    set_model as _set_model,
 )
 
 mcp = FastMCP("agy-mcp")
@@ -77,6 +80,11 @@ async def ask_antigravity(
 
     For a multi-turn conversation, pass the `conversation_id` returned by a previous
     call back in as `conversation`; the new turn is appended and context carries over.
+
+    IMPORTANT — auto git behaviour: when agy writes or edits code files, it will
+    automatically run `git add / commit / push` on its own without being asked.
+    If you do NOT want agy to commit or push, explicitly say so in the prompt
+    (e.g. "do not commit or push, just write the file").
 
     Args:
         prompt:       The prompt / question to send.
@@ -187,9 +195,68 @@ async def export_conversation(
 
 
 @mcp.tool()
-async def list_models() -> list[str]:
-    """List all available Antigravity CLI models."""
-    return await asyncio.to_thread(_list_models)
+async def list_models() -> dict:
+    """List all available Antigravity CLI models.
+
+    RECOMMENDED WORKFLOW before delegating tasks to agy:
+      1. Call get_quota()       — check remaining quota for Gemini and Claude/GPT groups.
+      2. Call list_models()     — see which models are available.
+      3. Call get_context_stats() — check how much context the active session has consumed.
+      4. Based on quota and context, decide how many / how heavy tasks to delegate.
+
+    Returns:
+        {"models": [<name>, ...], "count": <n>}
+    """
+    models = await asyncio.to_thread(_list_models)
+    return {"models": models, "count": len(models)}
+
+
+@mcp.tool()
+async def get_quota() -> dict:
+    """Fetch weekly/five-hour group quota from agy's local gRPC server.
+
+    Starts agy headlessly, queries RetrieveUserQuotaSummary, then kills agy.
+    Takes ~15-20 s. Returns None values if gRPC is unavailable.
+
+    IMPORTANT: weekly_pct and fiveh_pct are REMAINING quota percentages (not used).
+    100% = fully available. 0% = exhausted.
+
+    Two quota groups:
+      - "gemini":    Gemini models (Flash, Pro, etc.)
+      - "claude_gpt": Claude and GPT models
+
+    If a group's fiveh_pct or weekly_pct is low, avoid heavy tasks on that group
+    until fiveh_reset_ts or weekly_reset_ts passes.
+
+    Returns:
+        {"quota": <dict> | null}
+    """
+    result = await asyncio.to_thread(_get_quota_summary)
+    return {"quota": result}
+
+
+@mcp.tool()
+async def get_context_stats(conversation_id: Optional[str] = None) -> dict:
+    """Return context/token usage stats for the active or most recent agy conversation.
+
+    Use this to gauge how saturated the current agy session is before sending more work.
+    pct_used = total_tokens / context_limit * 100. When pct_used is high (>70%),
+    consider starting a fresh conversation to avoid context degradation.
+
+    Args:
+        conversation_id: Specific conversation ID to inspect; omit for the live/latest session.
+
+    Returns:
+        Token counts, step breakdown, and conversation metadata.
+    """
+    return await asyncio.to_thread(_get_context_stats, conversation_id)
+
+
+@mcp.tool()
+async def debug_model_raw() -> str:
+    """Debug: return raw ConPTY output from /model injection (temporary diagnostic)."""
+    from agy_core import _debug_model_raw as _dmr
+    return await asyncio.to_thread(_dmr)
 
 
 @mcp.tool()
@@ -508,6 +575,30 @@ async def agent_session_state(conversation_id: Optional[str] = None) -> dict:
 
 
 # ---- Tier F: ConPTY pseudo-terminal injection for interactive-only commands ----
+
+
+@mcp.tool()
+async def set_model(model_name: str) -> dict:
+    """Switch the active agy model (/model).
+
+    Launches agy interactively, injects /model <name>, and returns the
+    confirmation text. The change persists across sessions (written to
+    settings.json by agy itself).
+
+    WARNING: This tool is currently broken — it returns {"output": "", "pid": ...}
+    but does NOT write to settings.json and the model does not change.
+    Workaround: directly edit the "model" field in
+    C:\\Users\\cclie\\.gemini\\antigravity-cli\\settings.json.
+    Use `list_models` to get valid model display names.
+
+    Args:
+        model_name: Model display name (e.g. "Gemini 3.5 Flash (High)").
+                    Use `list_models` to see available names.
+
+    Returns:
+        {"output": <confirmation text>, "pid": <agy pid>} or {"error": <msg>}
+    """
+    return await asyncio.to_thread(_set_model, model_name)
 
 
 @mcp.tool()
