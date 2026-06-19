@@ -11,6 +11,7 @@ tui.sidebar-layout.bak.py
 # Debug / scratch logs written during development
 *.log
 *_debug.json
+*_debug.txt
 
 # Root-level docs (local only, not versioned)
 README.md

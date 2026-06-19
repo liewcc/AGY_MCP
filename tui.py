@@ -174,18 +174,18 @@ class QuotaPanel(Static):
                 if result:
                     quota_text += "[bold]Gemini Group Limits[/bold]\n"
                     if g := result.get("gemini"):
-                        quota_text += f"  Weekly: {g.get('weekly_pct', 0):.1f}%\n"
+                        quota_text += f"  Weekly: {self._pct(g.get('weekly_pct')):.1f}%\n"
                         if weekly_reset := g.get("weekly_reset_ts"):
                             quota_text += f"    {self._format_countdown(weekly_reset)}\n"
-                        quota_text += f"  Five-Hour: {g.get('fiveh_pct', 0):.1f}%\n"
+                        quota_text += f"  Five-Hour: {self._pct(g.get('fiveh_pct')):.1f}%\n"
                         if fiveh_reset := g.get("fiveh_reset_ts"):
                             quota_text += f"    {self._format_countdown(fiveh_reset)}\n"
                     quota_text += "\n[bold]Claude & GPT Group Limits[/bold]\n"
                     if c := result.get("claude_gpt"):
-                        quota_text += f"  Weekly: {c.get('weekly_pct', 0):.1f}%\n"
+                        quota_text += f"  Weekly: {self._pct(c.get('weekly_pct')):.1f}%\n"
                         if weekly_reset := c.get("weekly_reset_ts"):
                             quota_text += f"    {self._format_countdown(weekly_reset)}\n"
-                        quota_text += f"  Five-Hour: {c.get('fiveh_pct', 0):.1f}%\n"
+                        quota_text += f"  Five-Hour: {self._pct(c.get('fiveh_pct')):.1f}%\n"
                         if fiveh_reset := c.get("fiveh_reset_ts"):
                             quota_text += f"    {self._format_countdown(fiveh_reset)}\n"
                 else:
@@ -203,6 +203,13 @@ class QuotaPanel(Static):
             self.query_one("#quota-content", Static).update(quota_text)
         except Exception:
             pass
+
+    @staticmethod
+    def _pct(v) -> float:
+        """Percentage of quota remaining. A missing bucket (None) means that
+        limit hasn't been tracked/hit yet → full quota (100%). A real 0.0 is a
+        genuinely-exhausted limit and must stay 0%."""
+        return 100.0 if v is None else v
 
     def _format_countdown(self, timestamp: int) -> str:
         """Format countdown time until reset."""
@@ -651,8 +658,10 @@ class CredentialPanel(Static):
         with Horizontal(id="cred-buttons"):
             yield Button("Log In", id="btn-login", variant="primary")
             yield Button("Log Out", id="btn-logout", variant="default")
+            yield Button("Console", id="btn-console", variant="success")
             yield Button("Shut Down", id="btn-shutdown", variant="error")
         yield Static("", id="cred-info")
+        yield Static("", id="oauth-status")
         yield Static("[bold]Trusted Workspaces[/bold]", id="ws-header")
         with VerticalScroll(id="ws-list"):
             pass
@@ -661,10 +670,45 @@ class CredentialPanel(Static):
             yield Button("+", id="btn-add-ws", variant="success")
         yield Static("[dim]○ agy status unknown[/dim]", id="agy-status")
 
+    _oauth_running = False
+
     def on_mount(self) -> None:
         self.refresh_info()
         self._reload_workspaces()
         self.set_interval(2, self._poll_status)
+
+    def _run_oauth_thread(self) -> None:
+        """Run the clipboard-bridge login in-process; report status to the TUI."""
+        from oauth_login import run_login
+
+        def status(msg: str) -> None:
+            self.app.call_from_thread(self._set_oauth_status, msg)
+
+        try:
+            run_login(status)
+        except Exception as e:
+            self.app.call_from_thread(self._set_oauth_status, f"[red]Error: {e}[/red]")
+        finally:
+            self.app.call_from_thread(self._oauth_finished)
+
+    def _set_oauth_status(self, msg: str) -> None:
+        try:
+            self.query_one("#oauth-status", Static).update(f"  {msg}")
+        except Exception:
+            pass
+
+    def _oauth_finished(self) -> None:
+        self._oauth_running = False
+        try:
+            self.query_one("#btn-login", Button).disabled = False
+        except Exception:
+            pass
+        self.refresh_info()
+        try:
+            self.app._update_profile()
+            self.app._load_models_async()
+        except Exception:
+            pass
 
     def _reload_workspaces(self) -> None:
         data = self._read_settings()
@@ -699,7 +743,16 @@ class CredentialPanel(Static):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn-login":
-            self.app._do_login()
+            # Run the clipboard-bridge OAuth login in-process (background thread),
+            # streaming status to #oauth-status and refreshing on completion.
+            if self._oauth_running:
+                return
+            self._oauth_running = True
+            event.button.disabled = True
+            self._set_oauth_status("Starting …")
+            threading.Thread(target=self._run_oauth_thread, daemon=True).start()
+        elif bid == "btn-console":
+            self.app._launch_agy_console()
         elif bid == "btn-logout":
             self.app._do_logout()
             self.refresh_info()
@@ -1074,8 +1127,8 @@ class AGYMCPApp(App):
         except Exception:
             pass
 
-    def _do_login(self) -> None:
-        """Trigger login."""
+    def _launch_agy_console(self) -> None:
+        """Open agy.exe in its own console window for interactive command testing."""
         try:
             subprocess.Popen([str(AGY_BIN)], creationflags=0x00000010)
         except Exception:

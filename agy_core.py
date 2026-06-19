@@ -402,7 +402,12 @@ def list_models(deadline_s: float = 25.0) -> list[str]:
     GetAvailableModels, extracts display names from the protobuf response, then
     kills the temporary agy process.  Falls back to settings.json current model.
     """
-    _dbg = open(r"D:\AI\AGY_MCP\_models_debug.txt", "w", encoding="utf-8")
+    # No-op debug sink: keeps the inline _dbg.write/flush/close calls harmless
+    # without writing a _models_debug.txt file. ponytail: shim instead of
+    # surgically removing ~15 scattered debug lines.
+    _dbg = type("_NullDbg", (), {"write": lambda *a: None,
+                                 "flush": lambda *a: None,
+                                 "close": lambda *a: None})()
 
     current = _settings_model()
     fallback = [current] if current else []
