@@ -65,8 +65,8 @@ where claude >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     set "CLAUDE_EXE=claude"
 ) else (
-    for /f "delims=" %%F in ('dir /b /s "%APPDATA%\Claude\claude-code\claude.exe" 2^>nul') do (
-        set "CLAUDE_EXE=%%F"
+    for /d %%D in ("%APPDATA%\Claude\claude-code\*") do (
+        if exist "%%D\claude.exe" set "CLAUDE_EXE=%%D\claude.exe"
     )
 )
 
