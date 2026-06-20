@@ -6,6 +6,31 @@ resume multi-turn conversations and read past sessions back.
 
 Run standalone for a smoke test:  python server.py
 Normally launched over stdio by the MCP client (see README).
+
+## Delegation Protocol (Claude ↔ agy)
+
+When Claude delegates a task to agy via `ask_antigravity`, a timeout error does NOT
+mean failure — agy may have already completed the work silently in the background.
+
+Rules Claude MUST follow every time it delegates to agy:
+
+1. **Completion marker** — always append this instruction to the prompt:
+       "When you finish, write the single word DONE to a file called `.agy_done`
+        in the working directory. Overwrite if it already exists."
+
+2. **After a timeout** — do NOT redo the work. Instead:
+   a. Read `.agy_done` — if it contains "DONE", agy succeeded; verify the side-effects
+      (git diff, read the target file) and continue.
+   b. If `.agy_done` is missing or empty, agy is still running or crashed — wait or
+      investigate before retrying.
+
+3. **Timeout sizing** — calibrate per task complexity:
+   - Single-file edit  : 120 s
+   - Multi-file refactor: 240 s
+   - Install / build   : 360 s
+
+4. **Idempotent prompts** — phrase tasks as "ensure X exists / is set to Y" so a
+   retry is always safe, never duplicating work.
 """
 import asyncio
 import datetime
