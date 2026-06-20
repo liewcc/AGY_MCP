@@ -98,7 +98,7 @@ echo  Setup complete!
 echo.
 echo  Next steps:
 echo  1. Double-click "AGY MCP" on your desktop to open the control panel.
-echo  2. In Claude Code, say: "继续：根据 SETUP.md 第二步，执行集成测试"
+echo  2. In Claude Code, say: "Run SETUP.md step 2 integration test"
 echo ============================================
 echo.
 pause
