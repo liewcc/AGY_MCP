@@ -60,10 +60,18 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo [4/4] Registering with Claude Code...
+set "CLAUDE_EXE="
 where claude >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo   WARNING: claude CLI not found in PATH.
-    echo   Run this command manually after installing Claude Code:
+if %ERRORLEVEL% equ 0 (
+    set "CLAUDE_EXE=claude"
+) else (
+    for /f "delims=" %%F in ('dir /b /s "%APPDATA%\Claude\claude-code\claude.exe" 2^>nul') do (
+        set "CLAUDE_EXE=%%F"
+    )
+)
+
+if not defined CLAUDE_EXE (
+    echo   WARNING: Claude Code not found. Run this manually after installing:
     echo     claude mcp add agy-mcp -- python "%~dp0server.py"
     goto :done
 )
@@ -71,20 +79,20 @@ if %ERRORLEVEL% neq 0 (
 set /p REGISTER_MCP="  Register agy-mcp with Claude Code now? (y/n): "
 if /i not "%REGISTER_MCP%"=="y" (
     echo   Skipped. Run manually when ready:
-    echo     claude mcp add agy-mcp -- python "%~dp0server.py"
+    echo     "%CLAUDE_EXE%" mcp add agy-mcp -- python "%~dp0server.py"
     goto :done
 )
 
-claude mcp add agy-mcp -- python "%~dp0server.py"
+"%CLAUDE_EXE%" mcp add agy-mcp -- python "%~dp0server.py"
 if %ERRORLEVEL% neq 0 (
     echo   WARNING: Registration failed. Try running manually:
-    echo     claude mcp add agy-mcp -- python "%~dp0server.py"
+    echo     "%CLAUDE_EXE%" mcp add agy-mcp -- python "%~dp0server.py"
     goto :done
 )
 
 echo.
 echo   Verifying registration...
-claude mcp list | findstr "agy-mcp" >nul 2>&1
+"%CLAUDE_EXE%" mcp list | findstr "agy-mcp" >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     echo   [OK] agy-mcp registered successfully.
 ) else (
