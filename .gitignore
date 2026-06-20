@@ -17,3 +17,6 @@ tui.sidebar-layout.bak.py
 README.md
 CLAUDE.md
 HANDOFF.md
+
+# Runtime data directory (profile stats cache, etc.)
+data/

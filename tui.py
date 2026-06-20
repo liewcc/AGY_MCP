@@ -23,6 +23,8 @@ import datetime
 
 from agy_core import list_models, get_quota_summary, get_context_stats, list_conversations as _list_conversations, CONV_DIR, read_conversation
 
+STATS_FILE = Path(__file__).parent / "data" / "profile_stats.json"
+
 # Configuration
 AGY_BIN = Path(
     os.environ.get("AGY_BIN")
@@ -303,6 +305,202 @@ class ContentPanel(Static):
             f"[yellow]●[/yellow] Tool calls:      {f(tool):>6} tokens ({p(tool)})\n"
             f"[dim]□  Free space:     {f(free):>6} ({p(free)})[/dim]"
         )
+
+
+class ProfileStatsPanel(Vertical):
+    """Quota stats panel — hand-drawn 2-level header, auto-sizing columns."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._cache: dict = {}
+        self._timer = None
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="ps-header-row"):
+            yield Label("[bold cyan]Profile Stats[/bold cyan]")
+            yield Static(id="ps-spacer")
+            yield Label("auto-refresh every")
+            yield Input(value="30", id="ps-interval")
+            yield Label("min")
+            yield Button("↻", id="btn-ps-refresh")
+        with VerticalScroll(id="ps-scroll"):
+            yield Static("", id="ps-content")
+
+    def on_mount(self) -> None:
+        self._load_cache_and_refresh()
+        self._setup_timer()
+
+    def on_resize(self) -> None:
+        self._render_table()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-ps-refresh":
+            self._refresh()
+            event.stop()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "ps-interval":
+            self._setup_timer()
+
+    def _get_profiles(self) -> list[str]:
+        current = self.app.profile_email
+        active = current if current and current != "(not signed in)" else None
+        profiles = ([active] if active else []) + [e for e in self._cache if e != active]
+        return profiles
+
+    def _col_width(self) -> int:
+        try:
+            w = self.query_one("#ps-scroll").content_size.width
+        except Exception:
+            w = 88
+        PROF_W = 20
+        return max(15, (w - 6 - PROF_W) // 4), PROF_W
+
+    @staticmethod
+    def _center(s: str, w: int) -> str:
+        if len(s) >= w:
+            return s[:w]
+        left = (w - len(s)) // 2
+        return " " * left + s + " " * (w - len(s) - left)
+
+    def _cell(self, pct: float | None, reset_ts: int | None, col_w: int) -> str:
+        def pad(s: str) -> str:
+            return s[:col_w] if len(s) >= col_w else s + " " * (col_w - len(s))
+        if pct is None:
+            return pad(" —")
+        if reset_ts:
+            secs = max(0, reset_ts - int(time.time()))
+            d, rem = divmod(secs, 86400)
+            h, m = rem // 3600, (rem % 3600) // 60
+            countdown = f"{d}d {h}h" if d > 0 else f"{h}h {m}m"
+            return pad(f" {pct:.1f}% ({countdown})")
+        return pad(f" {pct:.1f}%")
+
+    @staticmethod
+    def _trunc(email: str, w: int) -> str:
+        user = email.split("@")[0]
+        if len(user) <= w:
+            return user.ljust(w)
+        return user[:w - 1] + "…"
+
+    def _render_table(self) -> None:
+        col_w, prof_w = self._col_width()
+        span = col_w * 2 + 1
+        s = "─"
+
+        def hline(l, i0, i1, i2, i3, r) -> str:
+            return l + s*prof_w + i0 + s*col_w + i1 + s*col_w + i2 + s*col_w + i3 + s*col_w + r
+
+        def border(t): return f"[dim]{t}[/dim]"
+        def sep(): return border("│")
+
+        profiles = self._get_profiles()
+        lines = [
+            border(hline("┌", "┬", "─", "┬", "─", "┐")),
+            sep() + f"[dim]{' '*prof_w}[/dim]" + sep() + f"[bold cyan]{self._center('Gemini Group', span)}[/bold cyan]" + sep() + f"[bold cyan]{self._center('Claude & GPT Group', span)}[/bold cyan]" + sep(),
+            border(hline("├", "┼", "┬", "┼", "┬", "┤")),
+            sep() + f"[dim]{self._center('Profile', prof_w)}[/dim]" + sep() + f"[dim]{self._center('Weekly', col_w)}[/dim]" + sep() + f"[dim]{self._center('5Hr Limit', col_w)}[/dim]" + sep() + f"[dim]{self._center('Weekly', col_w)}[/dim]" + sep() + f"[dim]{self._center('5Hr Limit', col_w)}[/dim]" + sep(),
+            border(hline("├", "┼", "┼", "┼", "┼", "┤")),
+        ]
+
+        if not profiles:
+            lines.append(sep() + f"[dim]{self._center('(not signed in)', prof_w + span*2 + 2)}[/dim]" + sep())
+        else:
+            current = self.app.profile_email
+            for i, p in enumerate(profiles):
+                e = self._cache.get(p, {})
+                is_active = (p == current)
+                raw = ("*" if is_active else " ") + self._trunc(p, prof_w - 1)
+                prof = raw[:prof_w].ljust(prof_w)
+                prof_color = "green" if is_active else "dim"
+                data_color = "white" if is_active else "dim"
+                gw = self._cell(e.get("gemini_weekly_pct"),  e.get("gemini_weekly_reset_ts"),  col_w)
+                g5 = self._cell(e.get("gemini_fiveh_pct"),   e.get("gemini_fiveh_reset_ts"),   col_w)
+                cw = self._cell(e.get("claude_weekly_pct"),  e.get("claude_weekly_reset_ts"),  col_w)
+                c5 = self._cell(e.get("claude_fiveh_pct"),   e.get("claude_fiveh_reset_ts"),   col_w)
+                lines.append(sep() + f"[{prof_color}]{prof}[/{prof_color}]" + sep() + f"[{data_color}]{gw}[/{data_color}]" + sep() + f"[{data_color}]{g5}[/{data_color}]" + sep() + f"[{data_color}]{cw}[/{data_color}]" + sep() + f"[{data_color}]{c5}[/{data_color}]" + sep())
+                if i < len(profiles) - 1:
+                    lines.append(border(hline("├", "┼", "┼", "┼", "┼", "┤")))
+
+        lines.append(border(hline("└", "┴", "┴", "┴", "┴", "┘")))
+
+        try:
+            self.query_one("#ps-content", Static).update("\n".join(lines))
+        except Exception:
+            pass
+
+
+    def _load_cache_and_refresh(self) -> None:
+        def work():
+            cache = {}
+            try:
+                if STATS_FILE.exists():
+                    with open(STATS_FILE, "r", encoding="utf-8") as f:
+                        cache = json.load(f)
+            except Exception:
+                pass
+            self.app.call_from_thread(self._apply_cache, cache)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_cache(self, cache: dict) -> None:
+        self._cache = cache
+        self._render_table()
+        self._refresh_live_quota()
+
+    def _refresh_live_quota(self) -> None:
+        current_email = self.app.profile_email
+        if not current_email or current_email == "(not signed in)":
+            return
+        def work():
+            try:
+                result = get_quota_summary()
+                self.app.call_from_thread(self._apply_live_quota, current_email, result)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_live_quota(self, email: str, result: dict | None) -> None:
+        if not result:
+            return
+        g = result.get("gemini") or {}
+        c = result.get("claude_gpt") or {}
+        self._cache[email] = {
+            "last_updated": int(time.time()),
+            "gemini_weekly_pct":      100.0 if g.get("weekly_pct") is None else g.get("weekly_pct"),
+            "gemini_weekly_reset_ts": g.get("weekly_reset_ts"),
+            "gemini_fiveh_pct":       g.get("fiveh_pct"),
+            "gemini_fiveh_reset_ts":  g.get("fiveh_reset_ts"),
+            "claude_weekly_pct":      100.0 if c.get("weekly_pct") is None else c.get("weekly_pct"),
+            "claude_weekly_reset_ts": c.get("weekly_reset_ts"),
+            "claude_fiveh_pct":       c.get("fiveh_pct"),
+            "claude_fiveh_reset_ts":  c.get("fiveh_reset_ts"),
+        }
+        def save():
+            try:
+                STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(STATS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(self._cache, f, indent=2)
+            except Exception:
+                pass
+        threading.Thread(target=save, daemon=True).start()
+        self._render_table()
+
+    def _refresh(self) -> None:
+        self._load_cache_and_refresh()
+
+    def _setup_timer(self) -> None:
+        if self._timer:
+            try:
+                self._timer.stop()
+            except Exception:
+                pass
+            self._timer = None
+        try:
+            minutes = float(self.query_one("#ps-interval", Input).value.strip())
+            if minutes > 0:
+                self._timer = self.set_interval(minutes * 60.0, self._refresh)
+        except Exception:
+            pass
 
 
 class ChatHistoryPanel(Vertical):
@@ -990,6 +1188,36 @@ class AGYMCPApp(App):
     OptionList > .option--option {
         padding: 0 1;
     }
+
+    #ps-header-row {
+        height: auto;
+        padding: 0 1;
+        align: left middle;
+    }
+    #ps-spacer {
+        width: 1fr;
+    }
+    #ps-interval {
+        height: 3;
+        width: 10;
+        margin: 0 1;
+        padding: 0 1;
+        border: solid $accent;
+        background: $boost;
+    }
+    #btn-ps-refresh {
+        width: auto;
+        height: 1;
+        min-height: 1;
+        border: none;
+    }
+    #ps-scroll {
+        height: 1fr;
+        padding: 1;
+    }
+    #ps-content {
+        width: auto;
+    }
     """
 
     TITLE = "AGY MCP - Control Panel"
@@ -1014,6 +1242,7 @@ class AGYMCPApp(App):
                 yield ListItem(Label("📈 Quota"), id="nav-quota")
                 yield ListItem(Label("📝 Content"), id="nav-content")
                 yield ListItem(Label("💬 Chat History"), id="nav-chats")
+                yield ListItem(Label("👤 Profile Stats"), id="nav-profile-stats")
 
             # Right content area
             with Vertical(id="content-area"):
@@ -1027,6 +1256,7 @@ class AGYMCPApp(App):
                     yield QuotaPanel(id="quota-view", classes="panel-content")
                     yield ContentPanel(id="content-view", classes="panel-content")
                     yield ChatHistoryPanel(id="chat-history-view", classes="panel-content")
+                    yield ProfileStatsPanel(id="profile-stats-view", classes="panel-content")
 
         yield Footer()
 
@@ -1053,6 +1283,9 @@ class AGYMCPApp(App):
         elif event.item.id == "nav-chats":
             switcher.current = "chat-history-view"
             self.query_one(ChatHistoryPanel)._load_async()
+        elif event.item.id == "nav-profile-stats":
+            switcher.current = "profile-stats-view"
+            self.query_one(ProfileStatsPanel)._refresh()
 
     def _update_profile(self) -> None:
         """Update profile card with current email."""
