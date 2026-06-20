@@ -59,13 +59,46 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
+echo [4/4] Registering with Claude Code...
+where claude >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo   WARNING: claude CLI not found in PATH.
+    echo   Run this command manually after installing Claude Code:
+    echo     claude mcp add agy-mcp -- python "%~dp0server.py"
+    goto :done
+)
+
+set /p REGISTER_MCP="  Register agy-mcp with Claude Code now? (y/n): "
+if /i not "%REGISTER_MCP%"=="y" (
+    echo   Skipped. Run manually when ready:
+    echo     claude mcp add agy-mcp -- python "%~dp0server.py"
+    goto :done
+)
+
+claude mcp add agy-mcp -- python "%~dp0server.py"
+if %ERRORLEVEL% neq 0 (
+    echo   WARNING: Registration failed. Try running manually:
+    echo     claude mcp add agy-mcp -- python "%~dp0server.py"
+    goto :done
+)
+
+echo.
+echo   Verifying registration...
+claude mcp list | findstr "agy-mcp" >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+    echo   [OK] agy-mcp registered successfully.
+) else (
+    echo   WARNING: Could not verify registration. Check with: claude mcp list
+)
+
+:done
+echo.
 echo ============================================
 echo  Setup complete!
 echo.
 echo  Next steps:
-echo  1. Double-click run.bat to open the control panel (TUI).
-echo  2. Connect the MCP server to your AI client:
-echo       claude mcp add agy-mcp -- python "%~dp0server.py"
+echo  1. Double-click "AGY MCP" on your desktop to open the control panel.
+echo  2. In Claude Code, say: "继续：根据 SETUP.md 第二步，执行集成测试"
 echo ============================================
 echo.
 pause
