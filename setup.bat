@@ -30,7 +30,7 @@ echo  AGY MCP Setup
 echo ============================================
 echo.
 
-echo [1/2] Installing Python dependencies...
+echo [1/3] Installing Python dependencies...
 pip install -r requirements.txt
 if %ERRORLEVEL% neq 0 (
     echo.
@@ -41,12 +41,21 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo [2/2] Checking for the Antigravity CLI...
+echo [2/3] Checking for the Antigravity CLI...
 if exist "%LOCALAPPDATA%\agy\bin\agy.exe" (
     echo   Found: %LOCALAPPDATA%\agy\bin\agy.exe
 ) else (
     echo   WARNING: agy.exe not found at %LOCALAPPDATA%\agy\bin\agy.exe
     echo   Install the Antigravity CLI and log in before using AGY MCP.
+)
+
+echo.
+echo [3/3] Creating desktop shortcut...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $lnk = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\AGY MCP.lnk'); $lnk.TargetPath = '%~dp0run.bat'; $lnk.WorkingDirectory = '%~dp0'; $lnk.IconLocation = '%~dp0img\logo.ico'; $lnk.Save()"
+if %ERRORLEVEL% neq 0 (
+    echo   WARNING: Could not create desktop shortcut.
+) else (
+    echo   Shortcut created: Desktop\AGY MCP.lnk
 )
 
 echo.
