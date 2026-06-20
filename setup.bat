@@ -1,4 +1,27 @@
 @echo off
+REM Check if agy CLI is already installed
+if exist "%LOCALAPPDATA%\agy\bin\agy.exe" (
+    echo [OK] agy CLI found at %LOCALAPPDATA%\agy\bin\agy.exe
+    goto :pip_install
+)
+
+echo [!] agy CLI not found.
+set /p INSTALL_AGY="Install agy CLI now? (y/n): "
+if /i "%INSTALL_AGY%"=="y" (
+    echo Installing agy CLI...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://antigravity.google/cli/install.ps1 | iex"
+    if not exist "%LOCALAPPDATA%\agy\bin\agy.exe" (
+        echo [ERROR] Installation failed. Please install manually: https://antigravity.google/download#antigravity-cli
+        exit /b 1
+    )
+    echo [OK] agy CLI installed successfully.
+) else (
+    echo [SKIP] Skipping agy CLI installation.
+    echo        Install manually later: https://antigravity.google/download#antigravity-cli
+)
+
+:pip_install
+
 title AGY MCP - Setup
 cd /d "%~dp0"
 
