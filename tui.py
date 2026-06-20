@@ -323,6 +323,7 @@ class ProfileStatsPanel(Vertical):
             yield Input(value="30", id="ps-interval")
             yield Label("min")
             yield Button("↻", id="btn-ps-refresh")
+        yield Static("", id="ps-table-header")
         with VerticalScroll(id="ps-scroll"):
             yield Static("", id="ps-content")
 
@@ -425,7 +426,11 @@ class ProfileStatsPanel(Vertical):
         lines.append(border(hline("└", "┴", "┴", "┴", "┴", "┘")))
 
         try:
-            self.query_one("#ps-content", Static).update("\n".join(lines))
+            self.query_one("#ps-table-header", Static).update("\n".join(lines[:5]))
+        except Exception:
+            pass
+        try:
+            self.query_one("#ps-content", Static).update("\n".join(lines[5:]))
         except Exception:
             pass
 
@@ -1211,9 +1216,13 @@ class AGYMCPApp(App):
         min-height: 1;
         border: none;
     }
+    #ps-table-header {
+        height: auto;
+        padding: 0 1;
+    }
     #ps-scroll {
         height: 1fr;
-        padding: 1;
+        padding: 0 1;
     }
     #ps-content {
         width: auto;
