@@ -9,3 +9,7 @@ grpcio
 
 # YAML support for statusline.yaml
 pyyaml
+
+# HTTP client for background version checking
+httpx
+

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -18,12 +19,44 @@ from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, B
 from textual.widgets.option_list import Option
 from textual.reactive import reactive
 from textual.events import Click
+from textual.screen import ModalScreen
 
 import datetime
 
 from agy_core import list_models, get_quota_summary, get_context_stats, list_conversations as _list_conversations, CONV_DIR, read_conversation
 
+
+
+VIEW_TO_NAV = {
+    "credential-view": "nav-credential",
+    "models-view": "nav-models",
+    "quota-view": "nav-quota",
+    "content-view": "nav-content",
+    "chat-history-view": "nav-chats",
+    "profile-stats-view": "nav-profile-stats",
+}
+
+
+class UpdateConfirmScreen(ModalScreen[bool]):
+    """A confirmation dialog for pulling update."""
+    def compose(self) -> ComposeResult:
+        with Container(id="dialog-container"):
+            yield Label("Are you sure you want to pull the latest version and restart the TUI?")
+            with Horizontal(id="dialog-buttons"):
+                yield Button("Yes, Update", variant="error", id="btn-confirm")
+                yield Button("Cancel", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-confirm":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+
 STATS_FILE = Path(__file__).parent / "data" / "profile_stats.json"
+
+REMOTE_VERSION_URL = "https://raw.githubusercontent.com/liewcc/AGY_MCP/master/version.json"
+LOCAL_VERSION_FILE = Path(__file__).parent / "version.json"
 
 # Configuration
 AGY_BIN = Path(
@@ -988,6 +1021,8 @@ class CredentialPanel(Static):
 class AGYMCPApp(App):
     """AGY MCP Control Panel - Textual version."""
 
+    update_available: reactive[bool] = reactive(False)
+
     CSS = """
     Screen {
         background: $surface;
@@ -1004,6 +1039,29 @@ class AGYMCPApp(App):
         height: 100%;
         border-right: solid $accent;
         background: $boost;
+        layout: vertical;
+    }
+
+    #nav-list {
+        height: 1fr;
+    }
+
+    #nav-update {
+        width: 100%;
+        height: 1;
+        background: $boost;
+        border: none;
+        color: $text-disabled;
+        text-style: dim;
+    }
+
+    #nav-update:focus {
+        background: $boost;
+    }
+
+    #nav-update.update-ready {
+        color: red;
+        text-style: bold;
     }
 
     #content-area {
@@ -1227,6 +1285,40 @@ class AGYMCPApp(App):
     #ps-content {
         width: auto;
     }
+
+    UpdateConfirmScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.5);
+    }
+
+    #dialog-container {
+        grid-size: 1;
+        padding: 1 2;
+        width: 60;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        align: center middle;
+    }
+
+    #dialog-container Label {
+        width: 100%;
+        content-align: center middle;
+        margin-bottom: 1;
+    }
+
+    #dialog-buttons {
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+        width: 100%;
+    }
+
+    #dialog-buttons Button {
+        margin: 0 1;
+        width: 16;
+    }
+
     """
 
     TITLE = "AGY MCP - Control Panel"
@@ -1245,13 +1337,15 @@ class AGYMCPApp(App):
 
         with Horizontal(id="main-container"):
             # Left sidebar - Navigation
-            with ListView(id="sidebar"):
-                yield ListItem(Label("🏠 Home"), id="nav-credential")
-                yield ListItem(Label("📊 Models"), id="nav-models")
-                yield ListItem(Label("📈 Quota"), id="nav-quota")
-                yield ListItem(Label("📝 Content"), id="nav-content")
-                yield ListItem(Label("💬 Chat History"), id="nav-chats")
-                yield ListItem(Label("👤 Profile Stats"), id="nav-profile-stats")
+            with Vertical(id="sidebar"):
+                with ListView(id="nav-list"):
+                    yield ListItem(Label("🏠 Home"), id="nav-credential")
+                    yield ListItem(Label("📊 Models"), id="nav-models")
+                    yield ListItem(Label("📈 Quota"), id="nav-quota")
+                    yield ListItem(Label("📝 Content"), id="nav-content")
+                    yield ListItem(Label("💬 Chat History"), id="nav-chats")
+                    yield ListItem(Label("👤 Profile Stats"), id="nav-profile-stats")
+                yield Button("↑ Update", id="nav-update", classes="disabled-item", disabled=True)
 
             # Right content area
             with Vertical(id="content-area"):
@@ -1273,6 +1367,7 @@ class AGYMCPApp(App):
         """Initialize when app starts."""
         self._load_models_async()
         self._update_profile()
+        threading.Thread(target=self._check_version, daemon=True).start()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle sidebar navigation — always reload on entry."""
@@ -1296,6 +1391,24 @@ class AGYMCPApp(App):
             switcher.current = "profile-stats-view"
             self.query_one(ProfileStatsPanel)._refresh()
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "nav-update" and self.update_available:
+            def _on_confirm(confirmed: bool | None) -> None:
+                if confirmed:
+                    subprocess.run(["git", "pull"], cwd=str(Path(__file__).parent))
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+            self.push_screen(UpdateConfirmScreen(), _on_confirm)
+
+    def watch_update_available(self, value: bool) -> None:
+        btn = self.query_one("#nav-update", Button)
+        btn.disabled = not value
+        if value:
+            btn.remove_class("disabled-item")
+            btn.add_class("update-ready")
+        else:
+            btn.add_class("disabled-item")
+            btn.remove_class("update-ready")
+
     def _update_profile(self) -> None:
         """Update profile card with current email."""
         try:
@@ -1315,6 +1428,20 @@ class AGYMCPApp(App):
 
         profile_card = self.query_one(ProfileCard)
         profile_card.email = self.profile_email
+
+    def _check_version(self) -> None:
+        """Background thread: fetch remote version.json and compare."""
+        try:
+            import urllib.request, json as _json
+            local = _json.loads(LOCAL_VERSION_FILE.read_text(encoding="utf-8"))
+            with urllib.request.urlopen(REMOTE_VERSION_URL, timeout=8) as r:
+                remote = _json.loads(r.read().decode("utf-8"))
+            def _ver(s):
+                return tuple(int(x) for x in s.split("."))
+            if _ver(remote["version"]) > _ver(local["version"]):
+                self.call_from_thread(setattr, self, "update_available", True)
+        except Exception:
+            pass
 
     def _load_models_async(self) -> None:
         """Load models in background thread, then push results to main thread."""
