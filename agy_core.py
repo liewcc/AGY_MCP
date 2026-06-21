@@ -392,6 +392,29 @@ def _settings_model() -> str | None:
     return None
 
 
+def _find_existing_grpc_port() -> tuple[int, str] | tuple[None, None]:
+    """Check if there is an existing agy process running and return its gRPC port and TLS cert."""
+    try:
+        pids = _agy_pids()
+        if pids:
+            ports = _listen_ports(pids)
+            if ports:
+                ssl_ctx = _ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = _ssl.CERT_NONE
+                for p in sorted(ports):
+                    try:
+                        with _sock.create_connection(("127.0.0.1", p), timeout=1.0) as s:
+                            with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
+                                cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
+                        return p, cert_pem
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return None, None
+
+
 _MODEL_NAME_RE = re.compile(r'((?:Gemini|Claude|GPT)[A-Za-z0-9 .\-]*\([A-Za-z]+\))')
 
 
@@ -426,40 +449,46 @@ def list_models(deadline_s: float = 25.0) -> list[str]:
         )
         return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
 
-    ports_before = _local_ports()
-    _dbg.write(f"ports_before={len(ports_before)}\n"); _dbg.flush()
-    proc = subprocess.Popen(
-        [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
-    )
-    _dbg.write(f"agy spawned pid={proc.pid}\n"); _dbg.flush()
+    proc = None
+    grpc_port, cert_pem = _find_existing_grpc_port()
+
+    if grpc_port is None:
+        ports_before = _local_ports()
+        _dbg.write(f"ports_before={len(ports_before)}\n"); _dbg.flush()
+        proc = subprocess.Popen(
+            [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
+        )
+        _dbg.write(f"agy spawned pid={proc.pid}\n"); _dbg.flush()
+
     try:
-        grpc_port: int | None = None
-        deadline = time.time() + deadline_s
-        while time.time() < deadline:
-            time.sleep(0.5)
-            new_ports = _local_ports() - ports_before
-            if len(new_ports) >= 2:
-                grpc_port = min(new_ports)
-                break
-        _dbg.write(f"grpc_port={grpc_port}\n"); _dbg.flush()
-        if grpc_port is None:
-            _dbg.write("FALLBACK: no grpc port found\n"); _dbg.close()
-            return fallback
+        if proc is not None:
+            grpc_port = None
+            deadline = time.time() + deadline_s
+            while time.time() < deadline:
+                time.sleep(0.5)
+                new_ports = _local_ports() - ports_before
+                if len(new_ports) >= 2:
+                    grpc_port = min(new_ports)
+                    break
+            _dbg.write(f"grpc_port={grpc_port}\n"); _dbg.flush()
+            if grpc_port is None:
+                _dbg.write("FALLBACK: no grpc port found\n"); _dbg.close()
+                return fallback
 
-        time.sleep(4.0)
+            time.sleep(4.0)
 
-        ssl_ctx = _ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = _ssl.CERT_NONE
-        try:
-            with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
-                with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
-                    cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
-            _dbg.write("ssl cert extracted ok\n"); _dbg.flush()
-        except Exception as e:
-            _dbg.write(f"ssl FAILED: {e}\n"); _dbg.close()
-            return fallback
+            ssl_ctx = _ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
+                    with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
+                        cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
+                _dbg.write("ssl cert extracted ok\n"); _dbg.flush()
+            except Exception as e:
+                _dbg.write(f"ssl FAILED: {e}\n"); _dbg.close()
+                return fallback
 
         creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
         opts = [("grpc.ssl_target_name_override", "localhost"),
@@ -513,11 +542,12 @@ def list_models(deadline_s: float = 25.0) -> list[str]:
 
         return models if models else fallback
     finally:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=_CREATE_NO_WINDOW,
-        )
+        if proc is not None:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+            )
 
 
 def _parse_quota_proto(data: bytes) -> dict | None:
@@ -637,33 +667,39 @@ def get_quota_summary(deadline_s: float = 20.0) -> dict | None:
         )
         return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
 
-    ports_before = _local_ports()
-    proc = subprocess.Popen(
-        [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
-    )
+    proc = None
+    grpc_port, cert_pem = _find_existing_grpc_port()
+
+    if grpc_port is None:
+        ports_before = _local_ports()
+        proc = subprocess.Popen(
+            [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
+        )
+
     try:
-        grpc_port: int | None = None
-        deadline = time.time() + deadline_s
-        while time.time() < deadline:
-            time.sleep(0.5)
-            new_ports = _local_ports() - ports_before
-            if len(new_ports) >= 2:
-                grpc_port = min(new_ports)
-                break
-        if grpc_port is None:
-            return None
+        if proc is not None:
+            grpc_port = None
+            deadline = time.time() + deadline_s
+            while time.time() < deadline:
+                time.sleep(0.5)
+                new_ports = _local_ports() - ports_before
+                if len(new_ports) >= 2:
+                    grpc_port = min(new_ports)
+                    break
+            if grpc_port is None:
+                return None
 
-        time.sleep(4.0)  # OAuth auth completes async inside agy
+            time.sleep(4.0)  # OAuth auth completes async inside agy
 
-        ssl_ctx = _ssl.create_default_context()
-        ssl_ctx.check_hostname = False; ssl_ctx.verify_mode = _ssl.CERT_NONE
-        try:
-            with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
-                with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
-                    cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
-        except Exception:
-            return None
+            ssl_ctx = _ssl.create_default_context()
+            ssl_ctx.check_hostname = False; ssl_ctx.verify_mode = _ssl.CERT_NONE
+            try:
+                with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
+                    with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
+                        cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
+            except Exception:
+                return None
 
         creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
         opts = [("grpc.ssl_target_name_override", "localhost"),
@@ -682,11 +718,12 @@ def get_quota_summary(deadline_s: float = 20.0) -> dict | None:
 
         return _parse_quota_proto(resp)
     finally:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=_CREATE_NO_WINDOW,
-        )
+        if proc is not None:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+            )
 
 
 # ---------------------------------------------------------------------------
