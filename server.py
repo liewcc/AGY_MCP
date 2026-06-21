@@ -18,11 +18,15 @@ Rules Claude MUST follow every time it delegates to agy:
        "When you finish, write the single word DONE to a file called `.agy_done`
         in the working directory. Overwrite if it already exists."
 
-2. **After a timeout** — do NOT redo the work. Instead:
-   a. Read `.agy_done` — if it contains "DONE", agy succeeded; verify the side-effects
-      (git diff, read the target file) and continue.
-   b. If `.agy_done` is missing or empty, agy is still running or crashed — wait or
+2. **After a timeout** — do NOT redo the work. Instead verify completion:
+   a. Check `git log --oneline -3` — a new commit from agy means it succeeded.
+   b. Call `read_conversation` with the last `conversation_id` — read what agy
+      actually did; the trajectory DB is written even when the MCP transport times out.
+   c. Check target file mtime — if modified after the call started, agy wrote it.
+   d. Only if all three show no progress: agy is still running or crashed — wait or
       investigate before retrying.
+   e. `.agy_done` marker (optional): append "write DONE to `.agy_done` when finished"
+      to the prompt for an explicit signal on long tasks.
 
 3. **Timeout sizing** — calibrate per task complexity:
    - Single-file edit  : 120 s
