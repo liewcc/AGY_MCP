@@ -54,6 +54,7 @@ class UpdateConfirmScreen(ModalScreen[bool]):
 
 
 STATS_FILE = Path(__file__).parent / "data" / "profile_stats.json"
+TUI_CONFIG_FILE = Path(__file__).parent / "data" / "tui_config.json"
 
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/liewcc/AGY_MCP/master/version.json"
 LOCAL_VERSION_FILE = Path(__file__).parent / "version.json"
@@ -349,11 +350,19 @@ class ProfileStatsPanel(Vertical):
         self._timer = None
 
     def compose(self) -> ComposeResult:
+        val = "30"
+        try:
+            if TUI_CONFIG_FILE.exists():
+                with open(TUI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    val = str(json.load(f).get("ps_interval", "30"))
+        except Exception:
+            pass
+
         with Horizontal(id="ps-header-row"):
             yield Label("[bold cyan]Profile Stats[/bold cyan]")
             yield Static(id="ps-spacer")
             yield Label("auto-refresh every")
-            yield Input(value="30", id="ps-interval")
+            yield Input(value=val, id="ps-interval")
             yield Label("min")
             yield Button("↻", id="btn-ps-refresh")
         yield Static("", id="ps-table-header")
@@ -372,9 +381,36 @@ class ProfileStatsPanel(Vertical):
             self._refresh()
             event.stop()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "ps-interval":
+            try:
+                if float(event.value.strip()) > 0:
+                    self._save_interval(event.value.strip())
+            except Exception:
+                pass
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "ps-interval":
             self._setup_timer()
+            try:
+                minutes_str = event.input.value.strip()
+                if float(minutes_str) > 0:
+                    self._save_interval(minutes_str)
+            except Exception:
+                pass
+
+    def _save_interval(self, val: str) -> None:
+        try:
+            TUI_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if TUI_CONFIG_FILE.exists():
+                with open(TUI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data["ps_interval"] = val
+            with open(TUI_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     def _get_profiles(self) -> list[str]:
         current = self.app.profile_email
