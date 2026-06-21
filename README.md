@@ -190,7 +190,7 @@ AGY_MCP exposes 39 tools to your AI client, categorized into Tiers A–F based o
 | E | gRPC connection to running `agy` processes | `list_tasks`, `agent_session_state` |
 | F | Windows ConPTY terminal injection | `run_goal`, `start_planning`, `toggle_fast_mode`, `list_models` |
 
-For the full detailed list of all 39 tools and their exact execution flow, see [agy_knowledge/architecture.md](file:///D:/AI/AGY_MCP/agy_knowledge/architecture.md).
+For the full per-tool inventory, browse `server.py` — every tool is decorated with `@mcp.tool()` and self-documented.
 
 ---
 
