@@ -668,14 +668,11 @@ def get_quota_summary(deadline_s: float = 20.0) -> dict | None:
         return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
 
     proc = None
-    grpc_port, cert_pem = _find_existing_grpc_port()
-
-    if grpc_port is None:
-        ports_before = _local_ports()
-        proc = subprocess.Popen(
-            [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
-        )
+    ports_before = _local_ports()
+    proc = subprocess.Popen(
+        [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
+    )
 
     try:
         if proc is not None:
