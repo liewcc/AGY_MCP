@@ -13,3 +13,6 @@ pyyaml
 # HTTP client for background version checking
 httpx
 
+# Windows Credential Manager access (used by tui.py for OAuth profile email)
+pywin32
+

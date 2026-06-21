@@ -18,7 +18,7 @@ AGY_MCP is a plugin that lets AI assistants like Claude talk directly to Google'
 * Windows OS
 * Python 3.10+ (in PATH — `python --version` must work)
 * Google Antigravity CLI (`agy.exe` at `%LOCALAPPDATA%\agy\bin\agy.exe`). `setup.bat` can install it for you if missing.
-* A trusted folder configured in `~/.gemini/trustedFolders.json` (created automatically on first `agy` use).
+* A trusted folder configured in `%USERPROFILE%\.gemini\trustedFolders.json` (created automatically on first `agy` use).
 
 ### 1.2 Run setup.bat
 
@@ -227,7 +227,7 @@ Adjust AGY_MCP behavior using the following environment variables:
 | Environment Variable | Default Value | Description |
 | :--- | :--- | :--- |
 | `AGY_BIN` | `%LOCALAPPDATA%\agy\bin\agy.exe` | Absolute path to the `agy` executable file. See [AGY_BIN](file:///D:/AI/AGY_MCP/agy_core.py#L58). |
-| `AGY_CONV_DIR` | `~/.gemini/antigravity-cli/conversations` | Path to the directory where SQLite conversation files are stored. See [AGY_CONV_DIR](file:///D:/AI/AGY_MCP/agy_core.py#L62). |
+| `AGY_CONV_DIR` | `%USERPROFILE%\.gemini\antigravity-cli\conversations` | Path to the directory where SQLite conversation files are stored. See [AGY_CONV_DIR](file:///D:/AI/AGY_MCP/agy_core.py#L62). |
 | `AGY_TRUSTED_CWD` | First `TRUST_FOLDER` in `trustedFolders.json` | Working directory to execute headless CLI tasks. See [AGY_TRUSTED_CWD](file:///D:/AI/AGY_MCP/agy_core.py#L203). |
 | `AGY_DEFAULT_MODEL` | `Gemini 3 Pro` | Model display name used for requests. See [AGY_DEFAULT_MODEL](file:///D:/AI/AGY_MCP/agy_core.py#L67). |
 | `AGY_TIMEOUT` | `120` | Headless execution timeout limit in seconds. See [AGY_TIMEOUT](file:///D:/AI/AGY_MCP/agy_core.py#L68). |

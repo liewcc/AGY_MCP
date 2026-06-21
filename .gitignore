@@ -19,3 +19,7 @@ HANDOFF.md
 
 # Runtime data directory (profile stats cache, etc.)
 data/
+
+# IDE workspace artifacts
+.vscode/
+.idea/
