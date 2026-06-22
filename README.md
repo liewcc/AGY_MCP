@@ -166,14 +166,18 @@ Save the file, then **fully restart the host app** (§ 1.4). To re-enable, just 
 
 ## 2. TUI Control Panel
 
-Run [run.bat](file:///D:/AI/AGY_MCP/run.bat) (or double-click the desktop shortcut) to launch [tui.py](file:///D:/AI/AGY_MCP/tui.py), a terminal-based control panel. Sections:
+Run `run.bat` (or double-click the desktop shortcut) to launch `tui.py`, a terminal-based control panel.
+
+**Profile bar** — a single row at the top of every page shows the signed-in account email, the active model name, and a **⚙** button that opens a model selection popup.
+
+Sections:
 
 * **Home** — top-level dashboard.
   * **Credential** card: shows the signed-in account; **Log In** / **Log Out** buttons drive the OAuth clipboard bridge (§ 1.3).
   * **Models** card: lists live models and lets you switch the active one.
   * **Quota** card: live group rate-limit progress bars for the **currently** signed-in account.
 * **Chats** — list / open / delete past `agy` conversations.
-* **Profile Stats** — multi-account quota table (§ 1.3.1). Snapshot per account is persisted to [`data/profile_stats.json`](file:///D:/AI/AGY_MCP/data/profile_stats.json).
+* **Profile Stats** — multi-account quota table (§ 1.3.1). The sidebar auto-collapses when this page is open to give the table full width; a **» Expand sidebar / « Collapse sidebar** button appears to toggle it. Snapshot per account is persisted to `data/profile_stats.json`.
 
 ---
 
