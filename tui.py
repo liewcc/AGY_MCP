@@ -1511,7 +1511,7 @@ class AGYMCPApp(App):
 
             # Right content area
             with Vertical(id="content-area"):
-                yield Button("← sidebar", id="toggle-sidebar-btn")
+                yield Button("» Expand sidebar", id="toggle-sidebar-btn")
                 # Profile section
                 yield ProfileCard(id="profile-section")
 
@@ -1571,7 +1571,7 @@ class AGYMCPApp(App):
             sidebar = self.query_one("#sidebar")
             sidebar.toggle_class("collapsed")
             btn = self.query_one("#toggle-sidebar-btn", Button)
-            btn.label = "→ sidebar" if sidebar.has_class("collapsed") else "← sidebar"
+            btn.label = "» Expand sidebar" if sidebar.has_class("collapsed") else "« Collapse sidebar"
             return
 
         if event.button.id == "nav-update" and self.update_available:
