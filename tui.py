@@ -19,7 +19,7 @@ from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, B
 from textual.widgets.option_list import Option
 from textual.reactive import reactive
 from textual.events import Click
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 
 import datetime
 
@@ -103,13 +103,57 @@ def _get_agy_status() -> str:
     except Exception:
         return "[dim]agy status unknown[/dim]"
 
-class ProfileCard(Static):
-    """Displays login profile information."""
-
+class ProfileCard(Horizontal):
     email = reactive("(not signed in)")
+    selected_model = reactive("(none)")
 
-    def render(self) -> str:
-        return f"Profile: {self.email}"
+    def compose(self) -> ComposeResult:
+        yield Label("Profile: (not signed in)", id="profile-email-lbl")
+        yield Label("(none)", id="profile-model-lbl")
+        yield Button("⚙", id="btn-change-model")
+
+    def watch_email(self, email: str) -> None:
+        try:
+            self.query_one("#profile-email-lbl", Label).update(f"Profile: {email}")
+        except Exception:
+            pass
+
+    def watch_selected_model(self, model: str) -> None:
+        try:
+            self.query_one("#profile-model-lbl", Label).update(model)
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-change-model":
+            event.stop()
+            self.app._load_models_async()
+            def _cb(model: str | None) -> None:
+                if model:
+                    self.app._set_selected_model(model)
+            self.app.push_screen(ModelSelectModal(), _cb)
+
+
+class ModelSelectModal(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="model-modal"):
+            yield Label("Select model", id="model-modal-title")
+            yield OptionList(id="modal-optionlist")
+            yield Button("Cancel", id="modal-cancel")
+
+    def on_mount(self) -> None:
+        ol = self.query_one("#modal-optionlist", OptionList)
+        for m in self.app.models_data:
+            ol.add_option(Option(m))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(str(event.option.prompt))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "modal-cancel":
+            self.dismiss(None)
 
 
 class ModelsPanel(Static):
@@ -433,18 +477,39 @@ class ProfileStatsPanel(Vertical):
         left = (w - len(s)) // 2
         return " " * left + s + " " * (w - len(s) - left)
 
-    def _cell(self, pct: float | None, reset_ts: int | None, col_w: int) -> str:
+    def _fmt_remaining(self, reset_ts: float | None) -> str:
+        if reset_ts is None or reset_ts == 0:
+            return "—"
+        delta = reset_ts - time.time()
+        if delta <= 0:
+            return "now"
+        secs = int(delta)
+        d, rem = divmod(secs, 86400)
+        h, rem2 = divmod(rem, 3600)
+        m = rem2 // 60
+        if d > 0:
+            return f"{d}d {h}h"
+        if h > 0:
+            return f"{h}h {m}m"
+        return f"{max(1, m)}m"
+
+    def _cell(self, pct: float | None, reset_ts: float | None, col_w: int) -> str:
         def pad(s: str) -> str:
             return s[:col_w] if len(s) >= col_w else s + " " * (col_w - len(s))
         if pct is None:
             return pad(" —")
-        if reset_ts:
-            secs = max(0, reset_ts - int(time.time()))
-            d, rem = divmod(secs, 86400)
-            h, m = rem // 3600, (rem % 3600) // 60
-            countdown = f"{d}d {h}h" if d > 0 else f"{h}h {m}m"
-            return pad(f" {pct:.1f}% ({countdown})")
-        return pad(f" {pct:.1f}%")
+        countdown = self._fmt_remaining(reset_ts)
+        return pad(f" {pct:.1f}% ({countdown})")
+
+    @staticmethod
+    def _pct_color(pct: float | None, is_active: bool) -> str:
+        if pct is None:
+            return "dim"
+        if pct > 20:
+            return "white" if is_active else "dim"
+        if pct == 0:
+            return "red"
+        return f"#ff{int(140 * pct / 20.0):02x}00"
 
     @staticmethod
     def _trunc(email: str, w: int) -> str:
@@ -483,12 +548,19 @@ class ProfileStatsPanel(Vertical):
                 raw = ("*" if is_active else " ") + self._trunc(p, prof_w - 1)
                 prof = raw[:prof_w].ljust(prof_w)
                 prof_color = "green" if is_active else "dim"
-                data_color = "white" if is_active else "dim"
-                gw = self._cell(e.get("gemini_weekly_pct"),  e.get("gemini_weekly_reset_ts"),  col_w)
-                g5 = self._cell(e.get("gemini_fiveh_pct"),   e.get("gemini_fiveh_reset_ts"),   col_w)
-                cw = self._cell(e.get("claude_weekly_pct"),  e.get("claude_weekly_reset_ts"),  col_w)
-                c5 = self._cell(e.get("claude_fiveh_pct"),   e.get("claude_fiveh_reset_ts"),   col_w)
-                lines.append(sep() + f"[{prof_color}]{prof}[/{prof_color}]" + sep() + f"[{data_color}]{gw}[/{data_color}]" + sep() + f"[{data_color}]{g5}[/{data_color}]" + sep() + f"[{data_color}]{cw}[/{data_color}]" + sep() + f"[{data_color}]{c5}[/{data_color}]" + sep())
+                gw_pct = e.get("gemini_weekly_pct")
+                g5_pct = e.get("gemini_fiveh_pct")
+                cw_pct = e.get("claude_weekly_pct")
+                c5_pct = e.get("claude_fiveh_pct")
+                gw_c = self._pct_color(gw_pct, is_active)
+                g5_c = self._pct_color(g5_pct, is_active)
+                cw_c = self._pct_color(cw_pct, is_active)
+                c5_c = self._pct_color(c5_pct, is_active)
+                gw = self._cell(gw_pct, e.get("gemini_weekly_reset_ts"), col_w)
+                g5 = self._cell(g5_pct, e.get("gemini_fiveh_reset_ts"), col_w)
+                cw = self._cell(cw_pct, e.get("claude_weekly_reset_ts"), col_w)
+                c5 = self._cell(c5_pct, e.get("claude_fiveh_reset_ts"), col_w)
+                lines.append(sep() + f"[{prof_color}]{prof}[/{prof_color}]" + sep() + f"[{gw_c}]{gw}[/{gw_c}]" + sep() + f"[{g5_c}]{g5}[/{g5_c}]" + sep() + f"[{cw_c}]{cw}[/{cw_c}]" + sep() + f"[{c5_c}]{c5}[/{c5_c}]" + sep())
                 if i < len(profiles) - 1:
                     lines.append(border(hline("├", "┼", "┼", "┼", "┼", "┤")))
 
@@ -1078,6 +1150,19 @@ class AGYMCPApp(App):
         layout: vertical;
     }
 
+    #sidebar.collapsed {
+        display: none;
+    }
+
+    #toggle-sidebar-btn {
+        width: 18;
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        border: none;
+        display: none;
+    }
+
     #nav-list {
         height: 1fr;
     }
@@ -1108,10 +1193,51 @@ class AGYMCPApp(App):
 
     #profile-section {
         width: 100%;
-        height: 4;
+        height: 3;
         border-bottom: solid $accent;
         padding: 1 1 0 1;
         background: $boost;
+        align: left middle;
+    }
+
+    #profile-email-lbl {
+        width: 1fr;
+        overflow-x: hidden;
+    }
+
+    #profile-model-lbl {
+        width: auto;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    #btn-change-model {
+        width: auto;
+        height: 1;
+        min-width: 3;
+        border: none;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    #model-modal {
+        width: 60;
+        height: auto;
+        max-height: 80%;
+        border: solid $accent;
+        background: $surface;
+        padding: 1;
+        align: center middle;
+    }
+
+    #model-modal-title {
+        text-align: center;
+        padding-bottom: 1;
+    }
+
+    #modal-cancel {
+        width: 100%;
+        margin-top: 1;
     }
 
     #cred-header {
@@ -1385,6 +1511,7 @@ class AGYMCPApp(App):
 
             # Right content area
             with Vertical(id="content-area"):
+                yield Button("← sidebar", id="toggle-sidebar-btn")
                 # Profile section
                 yield ProfileCard(id="profile-section")
 
@@ -1410,24 +1537,43 @@ class AGYMCPApp(App):
         switcher = self.query_one(ContentSwitcher)
 
         if event.item.id == "nav-credential":
+            self.query_one("#sidebar").remove_class("collapsed")
+            self.query_one("#toggle-sidebar-btn").display = False
             switcher.current = "credential-view"
         elif event.item.id == "nav-models":
+            self.query_one("#sidebar").remove_class("collapsed")
+            self.query_one("#toggle-sidebar-btn").display = False
             switcher.current = "models-view"
             self._load_models_async()
         elif event.item.id == "nav-quota":
+            self.query_one("#sidebar").remove_class("collapsed")
+            self.query_one("#toggle-sidebar-btn").display = False
             switcher.current = "quota-view"
             self.query_one(QuotaPanel)._reload_quota()
         elif event.item.id == "nav-content":
+            self.query_one("#sidebar").remove_class("collapsed")
+            self.query_one("#toggle-sidebar-btn").display = False
             switcher.current = "content-view"
             self.query_one(ContentPanel)._load_async()
         elif event.item.id == "nav-chats":
+            self.query_one("#sidebar").remove_class("collapsed")
+            self.query_one("#toggle-sidebar-btn").display = False
             switcher.current = "chat-history-view"
             self.query_one(ChatHistoryPanel)._load_async()
         elif event.item.id == "nav-profile-stats":
             switcher.current = "profile-stats-view"
+            self.query_one("#sidebar").add_class("collapsed")
+            self.query_one("#toggle-sidebar-btn").display = True
             self.query_one(ProfileStatsPanel)._refresh()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "toggle-sidebar-btn":
+            sidebar = self.query_one("#sidebar")
+            sidebar.toggle_class("collapsed")
+            btn = self.query_one("#toggle-sidebar-btn", Button)
+            btn.label = "→ sidebar" if sidebar.has_class("collapsed") else "← sidebar"
+            return
+
         if event.button.id == "nav-update" and self.update_available:
             def _on_confirm(confirmed: bool | None) -> None:
                 if confirmed:
@@ -1464,6 +1610,7 @@ class AGYMCPApp(App):
 
         profile_card = self.query_one(ProfileCard)
         profile_card.email = self.profile_email
+        profile_card.selected_model = self._get_selected_model() or "(none)"
 
     def _check_version(self) -> None:
         """Background thread: fetch remote version.json and compare."""
@@ -1501,6 +1648,10 @@ class AGYMCPApp(App):
         panel.loading = False
         if selected:
             panel.selected_model = selected
+            try:
+                self.query_one(ProfileCard).selected_model = selected
+            except Exception:
+                pass
 
     def _get_selected_model(self) -> str | None:
         """Read currently selected model from settings."""
@@ -1529,6 +1680,10 @@ class AGYMCPApp(App):
             # Update UI
             panel = self.query_one(ModelsPanel)
             panel.selected_model = model_name
+            try:
+                self.query_one(ProfileCard).selected_model = model_name
+            except Exception:
+                pass
         except Exception:
             pass
 
