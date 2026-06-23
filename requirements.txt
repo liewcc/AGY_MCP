@@ -16,3 +16,5 @@ httpx
 # Windows Credential Manager access (used by tui.py for OAuth profile email)
 pywin32
 
+# Process and network monitoring to avoid flashing powershell windows
+psutil

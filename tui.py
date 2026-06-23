@@ -83,25 +83,37 @@ def get_agy_version() -> str:
 def _get_agy_status() -> str:
     """Check if agy/Antigravity processes are running (blocking, run in thread)."""
     try:
-        r = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "Get-Process -Name agy,Antigravity -ErrorAction SilentlyContinue "
-             "| Select-Object Id,Name,@{N='MB';E={[int]($_.WorkingSet/1MB)}} "
-             "| ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=5, creationflags=0x08000000,
-        )
-        raw = r.stdout.strip()
-        if not raw:
+        import psutil
+        processes = []
+        for p in psutil.process_iter(attrs=["pid", "name", "memory_info"]):
+            try:
+                name = p.info["name"]
+                if name:
+                    name_lower = name.lower()
+                    if name_lower in ("agy", "antigravity", "agy.exe", "antigravity.exe"):
+                        pid = p.info["pid"]
+                        mem = p.info["memory_info"]
+                        mb = int(mem.rss / (1024 * 1024)) if mem else 0
+                        name_display = name[:-4] if name_lower.endswith(".exe") else name
+                        processes.append({
+                            "Id": pid,
+                            "Name": name_display,
+                            "MB": mb
+                        })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
+        if not processes:
             return "[dim]no agy processes[/dim]"
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            data = [data]
+
+        processes.sort(key=lambda x: x["Id"])
         lines = ["[green]● agy processes[/green]"]
-        for p in data:
+        for p in processes:
             lines.append(f"  [dim]PID {p['Id']}[/dim]  {p['Name']}  {p['MB']} MB")
         return "\n".join(lines)
     except Exception:
         return "[dim]agy status unknown[/dim]"
+
 
 class ProfileCard(Horizontal):
     email = reactive("(not signed in)")

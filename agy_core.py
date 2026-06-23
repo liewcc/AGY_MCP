@@ -441,13 +441,15 @@ def list_models(deadline_s: float = 25.0) -> list[str]:
         return fallback
 
     def _local_ports() -> set[int]:
-        r = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 "
-             "-ErrorAction SilentlyContinue | Select-Object LocalPort | ConvertTo-Json"],
-            capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
-        )
-        return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
+        import psutil
+        try:
+            return {
+                conn.laddr.port
+                for conn in psutil.net_connections(kind="inet")
+                if conn.status == "LISTEN" and conn.laddr.ip == "127.0.0.1"
+            }
+        except Exception:
+            return set()
 
     proc = None
     grpc_port, cert_pem = _find_existing_grpc_port()
@@ -659,20 +661,25 @@ def get_quota_summary(deadline_s: float = 20.0) -> dict | None:
         return None
 
     def _local_ports() -> set[int]:
-        r = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 "
-             "-ErrorAction SilentlyContinue | Select-Object LocalPort | ConvertTo-Json"],
-            capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
-        )
-        return {int(m.group(1)) for m in re.finditer(r'"LocalPort":\s*(\d+)', r.stdout)}
+        import psutil
+        try:
+            return {
+                conn.laddr.port
+                for conn in psutil.net_connections(kind="inet")
+                if conn.status == "LISTEN" and conn.laddr.ip == "127.0.0.1"
+            }
+        except Exception:
+            return set()
 
     proc = None
-    ports_before = _local_ports()
-    proc = subprocess.Popen(
-        [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
-    )
+    grpc_port, cert_pem = _find_existing_grpc_port()
+
+    if grpc_port is None:
+        ports_before = _local_ports()
+        proc = subprocess.Popen(
+            [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
+        )
 
     try:
         if proc is not None:
@@ -1377,26 +1384,33 @@ _CMD_JSON_RE = re.compile(r'\{[^{}]*"CommandLine"[^{}]*\}')
 
 
 def _agy_pids() -> list[int]:
-    r = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command",
-         "Get-Process agy -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"],
-        capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
-    )
-    return [int(x) for x in re.findall(r"\d+", r.stdout)]
+    import psutil
+    pids = []
+    for p in psutil.process_iter(attrs=["pid", "name"]):
+        try:
+            name = p.info["name"]
+            if name:
+                name_lower = name.lower()
+                if "agy" in name_lower or "antigravity" in name_lower:
+                    pids.append(p.info["pid"])
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return pids
 
 
 def _listen_ports(pids: list[int]) -> list[int]:
     if not pids:
         return []
-    pidset = ",".join(str(p) for p in pids)
-    r = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command",
-         f"Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 "
-         f"-ErrorAction SilentlyContinue | Where-Object {{ @({pidset}) -contains "
-         f"$_.OwningProcess }} | Select-Object -ExpandProperty LocalPort"],
-        capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
-    )
-    return sorted(int(m) for m in re.findall(r"\d+", r.stdout))
+    import psutil
+    pid_set = set(pids)
+    ports = set()
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.status == "LISTEN" and conn.laddr.ip == "127.0.0.1" and conn.pid in pid_set:
+                ports.add(conn.laddr.port)
+    except Exception:
+        pass
+    return sorted(ports)
 
 
 def _grpc_channel(port: int):
