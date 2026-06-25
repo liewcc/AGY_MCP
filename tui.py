@@ -1670,6 +1670,15 @@ class AGYMCPApp(App):
                 self.query_one(ProfileCard).selected_model = selected
             except Exception:
                 pass
+        # list_models() may have warm-booted agy; re-fetch quota now that agy is running.
+        try:
+            self.query_one(QuotaPanel)._load_quota_async()
+        except Exception:
+            pass
+        try:
+            self.query_one(ProfileStatsPanel)._refresh_live_quota()
+        except Exception:
+            pass
 
     def _get_selected_model(self) -> str | None:
         """Read currently selected model from settings."""
