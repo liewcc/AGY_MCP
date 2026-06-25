@@ -320,12 +320,17 @@ def ask_agy(
     args += ["--print", prompt]
 
     start = time.time()
-    subprocess.run(
-        args, cwd=cwd,
-        env={**os.environ, "GEMINI_CLI_TRUST_WORKSPACE": "true"},
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=_CREATE_NO_WINDOW, timeout=timeout,
-    )
+    _extra_env = {"GEMINI_CLI_TRUST_WORKSPACE": "true"}
+    _orig = {k: os.environ.get(k) for k in _extra_env}
+    os.environ.update(_extra_env)
+    try:
+        _hidden_desktop_run(args, cwd=cwd, timeout=timeout)
+    finally:
+        for k, v in _orig.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     touched = sorted(
         (p for p in glob.glob(os.path.join(CONV_DIR, "*.db"))
@@ -369,6 +374,77 @@ def _ensure_console_session() -> None:
         hwnd = _k32.GetConsoleWindow()
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+
+
+def _hidden_desktop_run(
+    args: list,
+    *,
+    env: dict | None = None,
+    cwd: str | None = None,
+    timeout: int | None = None,
+) -> int:
+    name = f"agy_hidden_{os.getpid()}_{int(time.time()*1000) % 100000}"
+    DESKTOP_ALL_ACCESS = 0x01FF
+    
+    hdesk = ctypes.windll.user32.CreateDesktopW(
+        name, None, None, 0, DESKTOP_ALL_ACCESS, None
+    )
+    if not hdesk:
+        res = subprocess.run(
+            args, cwd=cwd, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW, timeout=timeout,
+        )
+        return res.returncode
+
+    try:
+        si = _STARTUPINFOW()
+        si.cb = ctypes.sizeof(si)
+        si.lpDesktop = name
+        si.dwFlags = 0
+        
+        pi = _PROCESS_INFORMATION()
+        
+        cmdline = subprocess.list2cmdline([str(a) for a in args])
+        cmd_buf = ctypes.create_unicode_buffer(cmdline)
+        flags = _CREATE_NO_WINDOW | _CREATE_UNICODE_ENVIRONMENT
+        
+        success = _k32.CreateProcessW(
+            None,
+            cmd_buf,
+            None,
+            None,
+            False,
+            flags,
+            None,
+            str(cwd) if cwd else None,
+            ctypes.byref(si),
+            ctypes.byref(pi),
+        )
+        
+        if not success:
+            res = subprocess.run(
+                args, cwd=cwd, env=env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW, timeout=timeout,
+            )
+            return res.returncode
+            
+        try:
+            wait_time = 0xFFFFFFFF if timeout is None else int(timeout * 1000)
+            res = _k32.WaitForSingleObject(pi.hProcess, wait_time)
+            if res == 0x00000102: # WAIT_TIMEOUT
+                _k32.TerminateProcess(pi.hProcess, 1)
+                raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+                
+            exit_code = wintypes.DWORD()
+            _k32.GetExitCodeProcess(pi.hProcess, ctypes.byref(exit_code))
+            return exit_code.value
+        finally:
+            _k32.CloseHandle(pi.hThread)
+            _k32.CloseHandle(pi.hProcess)
+    finally:
+        ctypes.windll.user32.CloseDesktop(hdesk)
 
 
 # ---------------------------------------------------------------------------
@@ -418,12 +494,13 @@ def _find_existing_grpc_port() -> tuple[int, str] | tuple[None, None]:
 _MODEL_NAME_RE = re.compile(r'((?:Gemini|Claude|GPT)[A-Za-z0-9 .\-]*\([A-Za-z]+\))')
 
 
-def list_models(deadline_s: float = 25.0) -> list[str]:
+def list_models() -> list[str]:
     """Return available model display labels via agy gRPC GetAvailableModels.
 
-    Starts a headless agy instance, waits for its gRPC language server, calls
-    GetAvailableModels, extracts display names from the protobuf response, then
-    kills the temporary agy process.  Falls back to settings.json current model.
+    Reuse-only: attaches to an already-running agy language server, calls
+    GetAvailableModels and extracts display names from the protobuf response.
+    Falls back to the settings.json current model when no agy is running (we
+    never cold-spawn agy — that boots its MCP fleet and flashes a window).
     """
     # No-op debug sink: keeps the inline _dbg.write/flush/close calls harmless
     # without writing a _models_debug.txt file. ponytail: shim instead of
@@ -440,58 +517,16 @@ def list_models(deadline_s: float = 25.0) -> list[str]:
         _dbg.write("EARLY RETURN: grpc None or no binary\n"); _dbg.close()
         return fallback
 
-    def _local_ports() -> set[int]:
-        import psutil
-        try:
-            return {
-                conn.laddr.port
-                for conn in psutil.net_connections(kind="inet")
-                if conn.status == "LISTEN" and conn.laddr.ip == "127.0.0.1"
-            }
-        except Exception:
-            return set()
-
-    proc = None
+    # Reuse-only: attach to an already-running agy. Never cold-spawn — booting
+    # agy launches its whole MCP-server fleet (conhost + python children), one of
+    # which flashes a console window. No spawn ⇒ no flash. When no agy is running
+    # we fall back to the settings.json current model.
     grpc_port, cert_pem = _find_existing_grpc_port()
-
     if grpc_port is None:
-        ports_before = _local_ports()
-        _dbg.write(f"ports_before={len(ports_before)}\n"); _dbg.flush()
-        proc = subprocess.Popen(
-            [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
-        )
-        _dbg.write(f"agy spawned pid={proc.pid}\n"); _dbg.flush()
+        _dbg.write("FALLBACK: no running agy gRPC server\n"); _dbg.close()
+        return fallback
 
     try:
-        if proc is not None:
-            grpc_port = None
-            deadline = time.time() + deadline_s
-            while time.time() < deadline:
-                time.sleep(0.5)
-                new_ports = _local_ports() - ports_before
-                if len(new_ports) >= 2:
-                    grpc_port = min(new_ports)
-                    break
-            _dbg.write(f"grpc_port={grpc_port}\n"); _dbg.flush()
-            if grpc_port is None:
-                _dbg.write("FALLBACK: no grpc port found\n"); _dbg.close()
-                return fallback
-
-            time.sleep(4.0)
-
-            ssl_ctx = _ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = _ssl.CERT_NONE
-            try:
-                with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
-                    with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
-                        cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
-                _dbg.write("ssl cert extracted ok\n"); _dbg.flush()
-            except Exception as e:
-                _dbg.write(f"ssl FAILED: {e}\n"); _dbg.close()
-                return fallback
-
         creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
         opts = [("grpc.ssl_target_name_override", "localhost"),
                 ("grpc.default_authority", "localhost")]
@@ -543,13 +578,9 @@ def list_models(deadline_s: float = 25.0) -> list[str]:
             models.insert(0, current)
 
         return models if models else fallback
-    finally:
-        if proc is not None:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=_CREATE_NO_WINDOW,
-            )
+    except Exception as e:
+        _dbg.write(f"reuse path FAILED: {e}\n"); _dbg.close()
+        return fallback
 
 
 def _parse_quota_proto(data: bytes) -> dict | None:
@@ -650,84 +681,43 @@ def _parse_quota_proto(data: bytes) -> dict | None:
     return result or None
 
 
-def get_quota_summary(deadline_s: float = 20.0) -> dict | None:
-    """Fetch Weekly/Five-Hour group quota from agy's local gRPC server.
+def get_quota_summary() -> dict | None:
+    """Fetch Weekly/Five-Hour group quota from an already-running agy's gRPC server.
 
-    Starts agy headlessly, waits for its language server ports, extracts the
-    self-signed TLS cert, calls RetrieveUserQuotaSummary, parses protobuf, kills
-    agy. Takes ~15 s; always call off the UI thread.
+    Reuse-only: attaches to an existing agy/Antigravity language server and calls
+    RetrieveUserQuotaSummary. Returns None (no data) when no agy is running.
+
+    We deliberately do NOT cold-spawn agy here. Cold-booting agy launches its
+    entire configured MCP-server fleet as child processes (conhost + several
+    python servers), one of which flashes a visible console window — the root
+    cause of the recurring black-window flash. No spawn ⇒ no flash, and no
+    wasteful full-stack boot just to read a quota number.
+    Trade-off: live quota is unavailable while agy isn't running (caller shows a
+    hint), and the reused value reflects the running agy's last refresh.
     """
     if grpc is None or not os.path.isfile(AGY_BIN):
         return None
 
-    def _local_ports() -> set[int]:
-        import psutil
-        try:
-            return {
-                conn.laddr.port
-                for conn in psutil.net_connections(kind="inet")
-                if conn.status == "LISTEN" and conn.laddr.ip == "127.0.0.1"
-            }
-        except Exception:
-            return set()
-
-    proc = None
     grpc_port, cert_pem = _find_existing_grpc_port()
-
     if grpc_port is None:
-        ports_before = _local_ports()
-        proc = subprocess.Popen(
-            [AGY_BIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
-        )
+        return None
 
+    creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
+    opts = [("grpc.ssl_target_name_override", "localhost"),
+            ("grpc.default_authority", "localhost")]
+    channel = grpc.secure_channel(f"127.0.0.1:{grpc_port}", creds, options=opts)
     try:
-        if proc is not None:
-            grpc_port = None
-            deadline = time.time() + deadline_s
-            while time.time() < deadline:
-                time.sleep(0.5)
-                new_ports = _local_ports() - ports_before
-                if len(new_ports) >= 2:
-                    grpc_port = min(new_ports)
-                    break
-            if grpc_port is None:
-                return None
-
-            time.sleep(4.0)  # OAuth auth completes async inside agy
-
-            ssl_ctx = _ssl.create_default_context()
-            ssl_ctx.check_hostname = False; ssl_ctx.verify_mode = _ssl.CERT_NONE
-            try:
-                with _sock.create_connection(("127.0.0.1", grpc_port), timeout=5) as s:
-                    with ssl_ctx.wrap_socket(s, server_hostname="localhost") as ts:
-                        cert_pem = _ssl.DER_cert_to_PEM_cert(ts.getpeercert(binary_form=True))
-            except Exception:
-                return None
-
-        creds = grpc.ssl_channel_credentials(root_certificates=cert_pem.encode())
-        opts = [("grpc.ssl_target_name_override", "localhost"),
-                ("grpc.default_authority", "localhost")]
-        channel = grpc.secure_channel(f"127.0.0.1:{grpc_port}", creds, options=opts)
-        try:
-            stub = channel.unary_unary(
-                "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
-                request_serializer=bytes, response_deserializer=bytes,
-            )
-            resp: bytes = stub(b"", timeout=10)
-        except Exception:
-            return None
-        finally:
-            channel.close()
-
-        return _parse_quota_proto(resp)
+        stub = channel.unary_unary(
+            "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+            request_serializer=bytes, response_deserializer=bytes,
+        )
+        resp: bytes = stub(b"", timeout=10)
+    except Exception:
+        return None
     finally:
-        if proc is not None:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=_CREATE_NO_WINDOW,
-            )
+        channel.close()
+
+    return _parse_quota_proto(resp)
 
 
 # ---------------------------------------------------------------------------
@@ -1656,3 +1646,12 @@ def ask_btw(query: str, conversation_id: Optional[str] = None) -> dict:
     """/btw — background side-question, simulated via agy --print."""
     answer, conv_id = ask_agy(query, conversation=conversation_id)
     return {"answer": answer, "conversation_id": conv_id}
+
+
+if __name__ == "__main__":
+    import psutil, time as _t
+    before = {p.pid for p in psutil.process_iter()}
+    code = _hidden_desktop_run([str(AGY_BIN), "--version"])
+    after = {p.pid for p in psutil.process_iter()}
+    new = [psutil.Process(p).name() for p in after - before if psutil.pid_exists(p)]
+    print(f"exit_code={code}, new_procs={new}")

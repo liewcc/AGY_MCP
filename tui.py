@@ -281,7 +281,8 @@ class QuotaPanel(Static):
                         if fiveh_reset := c.get("fiveh_reset_ts"):
                             quota_text += f"    {self._format_countdown(fiveh_reset)}\n"
                 else:
-                    quota_text += "[dim](no quota data available)[/dim]"
+                    quota_text += ("[dim]No live quota — start Antigravity (or an agy\n"
+                                   "session) and reload to read real-time quota.[/dim]")
             except Exception as e:
                 quota_text = f"[dim]Error loading quota: {e}[/dim]"
             self.app.call_from_thread(self._apply_quota, quota_text)
