@@ -607,10 +607,10 @@ class ProfileStatsPanel(Vertical):
         self._refresh_live_quota()
 
     def _refresh_live_quota(self) -> None:
-        current_email = self.app.profile_email
-        if not current_email or current_email == "(not signed in)":
-            return
         def work():
+            current_email = self.app.profile_email
+            if not current_email or current_email == "(not signed in)":
+                return
             try:
                 result = get_quota_summary()
                 self.app.call_from_thread(self._apply_live_quota, current_email, result)
@@ -1624,6 +1624,11 @@ class AGYMCPApp(App):
         profile_card = self.query_one(ProfileCard)
         profile_card.email = self.profile_email
         profile_card.selected_model = self._get_selected_model() or "(none)"
+        if self.profile_email and self.profile_email != "(not signed in)":
+            try:
+                self.query_one(ProfileStatsPanel)._refresh_live_quota()
+            except Exception:
+                pass
 
     def _check_version(self) -> None:
         """Background thread: fetch remote version.json and compare."""
