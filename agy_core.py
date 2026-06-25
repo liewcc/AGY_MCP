@@ -67,6 +67,7 @@ CONV_DIR = os.environ.get(
 _AGY_HOME = os.path.join(_HOME, ".gemini", "antigravity-cli")
 DEFAULT_MODEL = os.environ.get("AGY_DEFAULT_MODEL", "Gemini 3 Pro")
 DEFAULT_TIMEOUT = int(os.environ.get("AGY_TIMEOUT", "120"))
+_AGY_WARM = os.environ.get("AGY_WARM", "1") != "0"
 
 # Windows process flags
 _CREATE_NO_WINDOW = 0x08000000
@@ -313,7 +314,6 @@ def ask_agy(
     timeout = timeout or DEFAULT_TIMEOUT
 
     # Warm-process gate: reuse persistent agy for simple single-turn prompts
-    _AGY_WARM = os.environ.get("AGY_WARM", "1") != "0"
     warmable = (
         _AGY_WARM
         and conversation is None
@@ -684,11 +684,21 @@ def list_models() -> list[str]:
         _dbg.write("EARLY RETURN: grpc None or no binary\n"); _dbg.close()
         return fallback
 
-    # Reuse-only: attach to an already-running agy. Never cold-spawn — booting
-    # agy launches its whole MCP-server fleet (conhost + python children), one of
-    # which flashes a console window. No spawn ⇒ no flash. When no agy is running
-    # we fall back to the settings.json current model.
+    # Prefer an already-running agy. If none found and warm mode is on, boot one
+    # via ConPTY + hidden desktop (no flash) so gRPC queries work.
     grpc_port, cert_pem = _find_existing_grpc_port()
+    if grpc_port is None and _AGY_WARM and current:
+        try:
+            _get_warm(current)
+            # _boot() waits for the prompt glyph; gRPC port may need a moment
+            # more — poll briefly (3s max) rather than one immediate retry.
+            for _ in range(6):
+                grpc_port, cert_pem = _find_existing_grpc_port()
+                if grpc_port is not None:
+                    break
+                time.sleep(0.5)
+        except Exception:
+            pass
     if grpc_port is None:
         _dbg.write("FALLBACK: no running agy gRPC server\n"); _dbg.close()
         return fallback
