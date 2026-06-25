@@ -18,6 +18,7 @@ Environment variable overrides:
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import glob
 import json
@@ -114,7 +115,7 @@ class _PROCESS_INFORMATION(ctypes.Structure):
     ]
 
 
-def _conpty_start(cmdline_str: str, width: int = 220) -> tuple | None:
+def _conpty_start(cmdline_str: str, width: int = 220, desktop_name: str | None = None) -> tuple | None:
     """Allocate a ConPTY and start a process inside it.
 
     Returns (hpc, pi, in_write, out_read) on success, None on failure.
@@ -146,6 +147,8 @@ def _conpty_start(cmdline_str: str, width: int = 220) -> tuple | None:
 
     siex = _STARTUPINFOEXW()
     siex.StartupInfo.cb = ctypes.sizeof(_STARTUPINFOEXW)
+    if desktop_name:
+        siex.StartupInfo.lpDesktop = desktop_name
     siex.lpAttributeList = ctypes.cast(attr_list, ctypes.c_void_p)
     pi = _PROCESS_INFORMATION()
     buf = ctypes.create_unicode_buffer(cmdline_str)
@@ -308,6 +311,21 @@ def ask_agy(
     """Run one headless prompt through agy --print; return (answer, conversation_id)."""
     model = model or DEFAULT_MODEL
     timeout = timeout or DEFAULT_TIMEOUT
+
+    # Warm-process gate: reuse persistent agy for simple single-turn prompts
+    _AGY_WARM = os.environ.get("AGY_WARM", "1") != "0"
+    warmable = (
+        _AGY_WARM
+        and conversation is None
+        and not add_dirs
+        and working_dir is None
+    )
+    if warmable:
+        try:
+            return _get_warm(model).ask(prompt, timeout_s=timeout)
+        except Exception:
+            pass  # fall through to cold path on any warm failure
+
     if not os.path.isfile(AGY_BIN):
         raise RuntimeError(f"agy.exe not found at {AGY_BIN!r} (set AGY_BIN to override).")
     cwd = os.path.normpath(working_dir) if working_dir else _resolve_trusted_cwd()
@@ -374,6 +392,155 @@ def _ensure_console_session() -> None:
         hwnd = _k32.GetConsoleWindow()
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+
+
+_ANSI_ESC = re.compile(rb'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+def _strip_ansi(b: bytes) -> bytes:
+    return _ANSI_ESC.sub(b"", b)
+
+class _WarmAgy:
+    """Persistent agy process reused across ask_agy() calls."""
+    
+    def __init__(self):
+        self.hpc = None
+        self.pi = None
+        self.in_write = None
+        self.out_read = None
+        self.chunks: list[bytes] = []
+        self._reader: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._buf_offset = 0
+        self._conv_id: str | None = None
+        self._model: str = ""
+        self._desktop: str = ""
+        self._hdesk = None
+
+    def _boot(self, model: str):
+        _ensure_console_session()  # required for ConPTY in headless (no-console) server
+        self._model = model
+        self._desktop = f"agy_warm_{os.getpid()}_{int(time.time()*1000) % 100000}"
+        DESKTOP_ALL_ACCESS = 0x01FF
+        self._hdesk = ctypes.windll.user32.CreateDesktopW(
+            self._desktop, None, None, 0, DESKTOP_ALL_ACCESS, None
+        )
+        
+        cmdline = f'"{AGY_BIN}" --dangerously-skip-permissions --model "{model}"'
+        res = _conpty_start(cmdline, desktop_name=self._desktop)
+        if not res:
+            raise RuntimeError("Failed to boot warm agy process.")
+        self.hpc, self.pi, self.in_write, self.out_read = res
+        
+        self.chunks, self._reader = _read_pty(self.out_read)
+        self._buf_offset = 0
+        
+        # Wait for readiness: poll chunks until prompt glyph appears
+        start_t = time.time()
+        while time.time() - start_t < 30.0:
+            if self._has_prompt(self.chunks[self._buf_offset:]):
+                self._buf_offset = len(self.chunks)
+                return
+            time.sleep(0.05)
+        raise RuntimeError("Timed out waiting for warm agy prompt.")
+
+    def _has_prompt(self, chunks: list[bytes]) -> bool:
+        # agy TUI uses ANSI cursor-positioning so the prompt glyph lands in
+        # the middle of the flat byte stream, not at the last line. Check any
+        # line that is *exactly* ">" or "❯" — distinctive enough to avoid
+        # false positives from model output.
+        content = b"".join(chunks)
+        clean = _strip_ansi(content)
+        return any(
+            ln.strip() in (b">", b"\xe2\x9d\xaf")
+            for ln in clean.split(b"\n")
+        )
+
+    def _alive(self) -> bool:
+        if not self.pi:
+            return False
+        STILL_ACTIVE = 259
+        code = wintypes.DWORD()
+        _k32.GetExitCodeProcess(self.pi.hProcess, ctypes.byref(code))
+        return code.value == STILL_ACTIVE
+
+    def ask(self, prompt: str, timeout_s: int) -> tuple[str, str]:
+        with self._lock:
+            if not self._alive():
+                self.close()
+                self._boot(self._model)
+            
+            dbs = glob.glob(os.path.join(CONV_DIR, "*.db"))
+            mark_time = max((os.path.getmtime(p) for p in dbs), default=0.0)
+            
+            safe_prompt = prompt.replace("\n", " ").replace("\r", " ")
+            # \x1b dismisses autocomplete (mirrors Tier F injection); \r submits
+            payload = safe_prompt.encode("utf-8") + b"\x1b\r"
+            
+            n = wintypes.DWORD(0)
+            _k32.WriteFile(self.in_write, payload, len(payload), ctypes.byref(n), None)
+            
+            start_t = time.time()
+            last_size = len(self.chunks)
+            last_change_t = time.time()
+            
+            while time.time() - start_t < timeout_s:
+                curr_size = len(self.chunks)
+                if curr_size > last_size:
+                    last_size = curr_size
+                    last_change_t = time.time()
+                
+                if time.time() - last_change_t > 0.6:
+                    if self._has_prompt(self.chunks[self._buf_offset:]):
+                        break
+                time.sleep(0.05)
+            
+            self._buf_offset = len(self.chunks)
+            
+            dbs_after = glob.glob(os.path.join(CONV_DIR, "*.db"))
+            new_dbs = [p for p in dbs_after if os.path.getmtime(p) > mark_time]
+            if not new_dbs:
+                raise RuntimeError("No new conversation DB found after warm ask.")
+            
+            newest_db = max(new_dbs, key=os.path.getmtime)
+            answer = _answer_from_db(newest_db)
+            self._conv_id = os.path.splitext(os.path.basename(newest_db))[0]
+            
+            return answer, self._conv_id
+
+    def close(self):
+        if self.pi:
+            try:
+                _conpty_kill(self.pi.dwProcessId, self.hpc, self.pi, self.in_write, self.out_read)
+            except Exception:
+                pass
+            self.pi = None
+        if self._hdesk:
+            try:
+                ctypes.windll.user32.CloseDesktop(self._hdesk)
+            except Exception:
+                pass
+            self._hdesk = None
+
+
+_WARM: "_WarmAgy | None" = None
+_WARM_LOCK = threading.Lock()
+
+def _get_warm(model: str) -> "_WarmAgy":
+    global _WARM
+    with _WARM_LOCK:
+        if _WARM is None or not _WARM._alive() or _WARM._model != model:
+            if _WARM is not None:
+                try: _WARM.close()
+                except: pass
+            _WARM = _WarmAgy()
+            _WARM._boot(model)
+    return _WARM
+
+def _warm_atexit():
+    global _WARM
+    if _WARM:
+        try: _WARM.close()
+        except: pass
+atexit.register(_warm_atexit)
 
 
 def _hidden_desktop_run(
@@ -1650,6 +1817,16 @@ def ask_btw(query: str, conversation_id: Optional[str] = None) -> dict:
 
 if __name__ == "__main__":
     import psutil, time as _t
+
+    # warm process test
+    os.environ["AGY_WARM"] = "1"
+    print("--- warm process test ---")
+    w = _WarmAgy()
+    w._boot(DEFAULT_MODEL)
+    print("booted, alive:", w._alive())
+    w.close()
+    print("closed ok")
+
     before = {p.pid for p in psutil.process_iter()}
     code = _hidden_desktop_run([str(AGY_BIN), "--version"])
     after = {p.pid for p in psutil.process_iter()}
