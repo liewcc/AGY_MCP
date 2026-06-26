@@ -625,13 +625,13 @@ class ProfileStatsPanel(Vertical):
         c = result.get("claude_gpt") or {}
         self._cache[email] = {
             "last_updated": int(time.time()),
-            "gemini_weekly_pct":      100.0 if g.get("weekly_pct") is None else g.get("weekly_pct"),
+            "gemini_weekly_pct":      g.get("weekly_pct"),
             "gemini_weekly_reset_ts": g.get("weekly_reset_ts"),
-            "gemini_fiveh_pct":       100.0 if g.get("fiveh_pct") is None else g.get("fiveh_pct"),
+            "gemini_fiveh_pct":       g.get("fiveh_pct"),
             "gemini_fiveh_reset_ts":  g.get("fiveh_reset_ts"),
-            "claude_weekly_pct":      100.0 if c.get("weekly_pct") is None else c.get("weekly_pct"),
+            "claude_weekly_pct":      c.get("weekly_pct"),
             "claude_weekly_reset_ts": c.get("weekly_reset_ts"),
-            "claude_fiveh_pct":       100.0 if c.get("fiveh_pct") is None else c.get("fiveh_pct"),
+            "claude_fiveh_pct":       c.get("fiveh_pct"),
             "claude_fiveh_reset_ts":  c.get("fiveh_reset_ts"),
         }
         # Don't persist a "(not signed in)" key — profile email resolves shortly after.
