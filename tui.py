@@ -23,7 +23,7 @@ from textual.screen import ModalScreen, Screen
 
 import datetime
 
-from agy_core import list_models, get_quota_summary, get_context_stats, list_conversations as _list_conversations, CONV_DIR, read_conversation
+from agy_core import list_models, get_quota_summary, get_context_stats, list_conversations as _list_conversations, CONV_DIR, read_conversation, reset_warm
 
 
 
@@ -472,8 +472,8 @@ class ProfileStatsPanel(Vertical):
     def _get_profiles(self) -> list[str]:
         current = self.app.profile_email
         active = current if current and current != "(not signed in)" else None
-        profiles = ([active] if active else []) + [e for e in self._cache if e != active]
-        return profiles
+        others = [e for e in self._cache if e != active and (active is None or e != "(not signed in)")]
+        return ([active] if active else []) + others
 
     def _col_width(self) -> int:
         try:
@@ -522,7 +522,7 @@ class ProfileStatsPanel(Vertical):
             return "white" if is_active else "dim"
         if pct == 0:
             return "red"
-        return f"#ff{int(140 * pct / 20.0):02x}00"
+        return f"#ff{max(1, int(140 * pct / 20.0)):02x}00"
 
     @staticmethod
     def _trunc(email: str, w: int) -> str:
@@ -608,12 +608,12 @@ class ProfileStatsPanel(Vertical):
 
     def _refresh_live_quota(self) -> None:
         def work():
-            current_email = self.app.profile_email
-            if not current_email or current_email == "(not signed in)":
-                return
             try:
                 result = get_quota_summary()
-                self.app.call_from_thread(self._apply_live_quota, current_email, result)
+                if result is None:
+                    return
+                email = self.app.profile_email or "(not signed in)"
+                self.app.call_from_thread(self._apply_live_quota, email, result)
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
@@ -627,21 +627,23 @@ class ProfileStatsPanel(Vertical):
             "last_updated": int(time.time()),
             "gemini_weekly_pct":      100.0 if g.get("weekly_pct") is None else g.get("weekly_pct"),
             "gemini_weekly_reset_ts": g.get("weekly_reset_ts"),
-            "gemini_fiveh_pct":       g.get("fiveh_pct"),
+            "gemini_fiveh_pct":       100.0 if g.get("fiveh_pct") is None else g.get("fiveh_pct"),
             "gemini_fiveh_reset_ts":  g.get("fiveh_reset_ts"),
             "claude_weekly_pct":      100.0 if c.get("weekly_pct") is None else c.get("weekly_pct"),
             "claude_weekly_reset_ts": c.get("weekly_reset_ts"),
-            "claude_fiveh_pct":       c.get("fiveh_pct"),
+            "claude_fiveh_pct":       100.0 if c.get("fiveh_pct") is None else c.get("fiveh_pct"),
             "claude_fiveh_reset_ts":  c.get("fiveh_reset_ts"),
         }
-        def save():
-            try:
-                STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-                with open(STATS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(self._cache, f, indent=2)
-            except Exception:
-                pass
-        threading.Thread(target=save, daemon=True).start()
+        # Don't persist a "(not signed in)" key — profile email resolves shortly after.
+        if email != "(not signed in)":
+            def save():
+                try:
+                    STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    with open(STATS_FILE, "w", encoding="utf-8") as f:
+                        json.dump({k: v for k, v in self._cache.items() if k != "(not signed in)"}, f, indent=2)
+                except Exception:
+                    pass
+            threading.Thread(target=save, daemon=True).start()
         self._render_table()
 
     def _refresh(self) -> None:
@@ -1061,11 +1063,8 @@ class CredentialPanel(Static):
         except Exception:
             pass
         self.refresh_info()
-        try:
-            self.app._update_profile()
-            self.app._load_models_async()
-        except Exception:
-            pass
+        threading.Thread(target=self.app._update_profile, daemon=True).start()
+        self.app._load_models_async()
 
     def _reload_workspaces(self) -> None:
         data = self._read_settings()
@@ -1542,7 +1541,7 @@ class AGYMCPApp(App):
     def on_mount(self) -> None:
         """Initialize when app starts."""
         self._load_models_async()
-        self._update_profile()
+        threading.Thread(target=self._update_profile, daemon=True).start()
         threading.Thread(target=self._check_version, daemon=True).start()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
@@ -1605,30 +1604,35 @@ class AGYMCPApp(App):
             btn.remove_class("update-ready")
 
     def _update_profile(self) -> None:
-        """Update profile card with current email."""
+        """Fetch profile email in background and push to main thread."""
         try:
             cred = win32cred.CredRead('gemini:antigravity', win32cred.CRED_TYPE_GENERIC)
             blob = json.loads(cred['CredentialBlob'].decode('utf-8'))
             access_token = blob['token']['access_token']
-
             req = urllib.request.Request(
                 'https://www.googleapis.com/oauth2/v3/userinfo',
                 headers={'Authorization': f'Bearer {access_token}'}
             )
             with urllib.request.urlopen(req, timeout=5) as res:
                 info = json.loads(res.read().decode('utf-8'))
-                self.profile_email = info.get("email", "(not signed in)")
+                email = info.get("email", "(not signed in)")
         except Exception:
-            self.profile_email = "(not signed in)"
+            email = "(not signed in)"
+        self.call_from_thread(self._apply_profile, email)
 
-        profile_card = self.query_one(ProfileCard)
-        profile_card.email = self.profile_email
-        profile_card.selected_model = self._get_selected_model() or "(none)"
-        if self.profile_email and self.profile_email != "(not signed in)":
-            try:
-                self.query_one(ProfileStatsPanel)._refresh_live_quota()
-            except Exception:
-                pass
+    def _apply_profile(self, email: str) -> None:
+        """Apply fetched email to DOM (runs on main thread)."""
+        self.profile_email = email
+        try:
+            profile_card = self.query_one(ProfileCard)
+            profile_card.email = email
+            profile_card.selected_model = self._get_selected_model() or "(none)"
+        except Exception:
+            pass
+        try:
+            self.query_one(ProfileStatsPanel)._refresh_live_quota()
+        except Exception:
+            pass
 
     def _check_version(self) -> None:
         """Background thread: fetch remote version.json and compare."""
@@ -1727,7 +1731,8 @@ class AGYMCPApp(App):
             win32cred.CredDelete(TargetName='gemini:antigravity', Type=win32cred.CRED_TYPE_GENERIC)
             self.models_data = []
             self.profile_email = "(not signed in)"
-            self._update_profile()
+            reset_warm()  # kill old account's agy so next login spawns fresh
+            threading.Thread(target=self._update_profile, daemon=True).start()
             panel = self.query_one(ModelsPanel)
             panel.models = []
         except Exception:

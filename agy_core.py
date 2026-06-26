@@ -543,6 +543,17 @@ def _warm_atexit():
 atexit.register(_warm_atexit)
 
 
+def reset_warm() -> None:
+    """Kill and discard the warm agy process (call on account switch so next
+    list_models() spawns a fresh session with the new account's credentials)."""
+    global _WARM
+    with _WARM_LOCK:
+        if _WARM is not None:
+            try: _WARM.close()
+            except: pass
+            _WARM = None
+
+
 def _hidden_desktop_run(
     args: list,
     *,
