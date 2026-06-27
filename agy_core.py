@@ -544,14 +544,28 @@ atexit.register(_warm_atexit)
 
 
 def reset_warm() -> None:
-    """Kill and discard the warm agy process (call on account switch so next
-    list_models() spawns a fresh session with the new account's credentials)."""
+    """Kill ALL running agy processes and discard _WARM.
+
+    Kills every agy/antigravity PID on the system (not just the one tracked by
+    _WARM in this process) so that after an account switch no stale gRPC server
+    survives to serve old-account quota data.
+    """
     global _WARM
     with _WARM_LOCK:
         if _WARM is not None:
             try: _WARM.close()
             except: pass
             _WARM = None
+    # kill any remaining agy processes from other Python instances (e.g. MCP server)
+    for pid in _agy_pids():
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
 
 
 def _hidden_desktop_run(
