@@ -422,6 +422,7 @@ class ProfileStatsPanel(Vertical):
             yield Input(value=val, id="ps-interval")
             yield Label("min")
             yield Button("↻", id="btn-ps-refresh")
+            yield Static("", id="ps-status")
         yield Static("", id="ps-table-header")
         with VerticalScroll(id="ps-scroll"):
             yield Static("", id="ps-content")
@@ -435,7 +436,7 @@ class ProfileStatsPanel(Vertical):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-ps-refresh":
-            self._refresh()
+            self._refresh(manual=True)
             event.stop()
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -606,20 +607,29 @@ class ProfileStatsPanel(Vertical):
         self._render_table()
         self._refresh_live_quota()
 
+    def _set_status(self, text: str) -> None:
+        """Update the status label next to the reload button."""
+        try:
+            self.query_one("#ps-status", Static).update(text)
+        except Exception:
+            pass
+
     def _refresh_live_quota(self) -> None:
         def work():
             try:
                 result = get_quota_summary()
                 if result is None:
+                    self.app.call_from_thread(self._on_refresh_done, None)
                     return
                 email = self.app.profile_email or "(not signed in)"
                 self.app.call_from_thread(self._apply_live_quota, email, result)
             except Exception:
-                pass
+                self.app.call_from_thread(self._on_refresh_done, None)
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_live_quota(self, email: str, result: dict | None) -> None:
         if not result:
+            self._on_refresh_done(None)
             return
         g = result.get("gemini") or {}
         c = result.get("claude_gpt") or {}
@@ -645,8 +655,33 @@ class ProfileStatsPanel(Vertical):
                     pass
             threading.Thread(target=save, daemon=True).start()
         self._render_table()
+        self._on_refresh_done(result)
 
-    def _refresh(self) -> None:
+    def _on_refresh_done(self, result: dict | None) -> None:
+        """Restore button and show status after a refresh attempt (main thread)."""
+        try:
+            btn = self.query_one("#btn-ps-refresh", Button)
+            btn.disabled = False
+            btn.label = "↻"
+        except Exception:
+            pass
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        if result:
+            self._set_status(f"[dim]✓ {ts}[/dim]")
+        else:
+            self._set_status(f"[dim yellow]⚠ no agy ({ts})[/dim yellow]")
+
+    def _refresh(self, manual: bool = False) -> None:
+        if manual:
+            # Show visual feedback immediately
+            try:
+                btn = self.query_one("#btn-ps-refresh", Button)
+                btn.disabled = True
+                btn.label = "↻ …"
+            except Exception:
+                pass
+            self._set_status("[dim]refreshing…[/dim]")
         self._load_cache_and_refresh()
 
     def _setup_timer(self) -> None:
@@ -1447,6 +1482,11 @@ class AGYMCPApp(App):
         height: 1;
         min-height: 1;
         border: none;
+    }
+    #ps-status {
+        width: auto;
+        height: 1;
+        margin: 0 0 0 1;
     }
     #ps-table-header {
         height: auto;
